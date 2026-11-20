@@ -2,6 +2,7 @@ import {
   BEAT_DOCUMENT_JSON_SCHEMA,
   BeatDocument,
   BeatMarcherSpec,
+  HolonomyConfig,
   INSTRUMENT_ROLES,
   InstrumentRole,
   MAX_BPM,
@@ -30,10 +31,24 @@ export interface WebMcpStatus {
   lastCall: string | null;
 }
 
+export type BeatDropTiming = 'now' | 'next-bar' | 'bar-8-fooof';
+
+export interface LiveJamTelemetry {
+  barInPhrase: number;
+  beatInBar: number;
+  barsUntilFooofDrop: number;
+  holonomyThetaDeg: number;
+  pendingDropTitle: string | null;
+}
+
 export interface WebMcpBridgeActions {
   getBeatDocument: () => BeatDocument;
+  getLiveTelemetry: () => LiveJamTelemetry;
   setBpm: (bpm: number) => { bpm: number; animFps: number };
   loadBeatDocument: (doc: BeatDocument) => BeatDocument;
+  queueBeatDrop: (doc: BeatDocument, timing: BeatDropTiming) => { queued: boolean; timing: BeatDropTiming; title: string };
+  setHolonomy: (patch: Partial<HolonomyConfig>) => HolonomyConfig;
+  getShareUrl: () => Promise<{ url: string; byteLength: number; compressed: boolean }>;
   upsertMarcher: (spec: Partial<BeatMarcherSpec> & { role: InstrumentRole }) => BeatMarcherSpec;
   removeMarcher: (id: string) => boolean;
   stageMarcher: (id: string | null) => string | null;
@@ -94,11 +109,13 @@ export function registerClearCubeWebMcp(actions: WebMcpBridgeActions): {
       inputSchema: { type: 'object', properties: {} },
       execute: wrap('get_beat_state', () => {
         const beat = actions.getBeatDocument();
+        const telemetry = actions.getLiveTelemetry();
         return {
           beat,
           animFps: bpmToAnimFps(beat.bpm),
           stepsPerBar: 8,
           sequencerSteps: 16,
+          liveClock: telemetry,
         };
       }),
     },
@@ -147,6 +164,81 @@ export function registerClearCubeWebMcp(actions: WebMcpBridgeActions): {
           animFps: bpmToAnimFps(loaded.bpm),
         };
       }),
+    },
+    {
+      name: 'queue_beat_drop',
+      description:
+        'Queues a complete BeatDocument to drop cleanly in musical sync — either right after the Bar-8 campfire FOOOF! ("bar-8-fooof") or on the next bar downbeat ("next-bar"). Lights up a live anticipation countdown on the Drei Stars.',
+      inputSchema: {
+        type: 'object',
+        required: ['beat'],
+        properties: {
+          beat: BEAT_DOCUMENT_JSON_SCHEMA,
+          timing: {
+            type: 'string',
+            enum: ['bar-8-fooof', 'next-bar', 'now'],
+            default: 'bar-8-fooof',
+          },
+        },
+      },
+      execute: wrap('queue_beat_drop', (args) => {
+        const candidate = args.beat ?? args;
+        const validation = validateBeatDocument(candidate);
+        if (!validation.document) {
+          return { ok: false, errors: validation.errors };
+        }
+        const rawTiming = String(args.timing ?? 'bar-8-fooof');
+        const timing: BeatDropTiming =
+          rawTiming === 'now' || rawTiming === 'next-bar' || rawTiming === 'bar-8-fooof'
+            ? rawTiming
+            : 'bar-8-fooof';
+        const res = actions.queueBeatDrop(validation.document, timing);
+        return { ok: true, ...res, warnings: validation.errors };
+      }),
+    },
+    {
+      name: 'set_holonomy',
+      description:
+        'Composes music geometrically by configuring the campfire Holonomy Sequencer: global manifold curvature K (-1..1), Euclidean rhythm rotation per orbit, diatonic parallel-transport harmony transposition, timbre morphing, and localized curvature wells.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          enabled: { type: 'boolean' },
+          curvature: { type: 'number', minimum: -1, maximum: 1 },
+          rhythmRotatePerOrbit: { type: 'boolean' },
+          harmonyTransposePerOrbit: { type: 'boolean' },
+          timbreMorph: { type: 'number', minimum: 0, maximum: 1 },
+          wells: {
+            type: 'array',
+            maxItems: 4,
+            items: {
+              type: 'object',
+              required: ['angle', 'radius', 'strength'],
+              properties: {
+                id: { type: 'string' },
+                angle: { type: 'number', minimum: 0, maximum: 6.29 },
+                radius: { type: 'number', minimum: 5.5, maximum: 10.8 },
+                strength: { type: 'number', minimum: -1, maximum: 1 },
+              },
+            },
+          },
+        },
+      },
+      execute: wrap('set_holonomy', (args) => {
+        const next = actions.setHolonomy(args as Partial<HolonomyConfig>);
+        return { ok: true, holonomy: next };
+      }),
+    },
+    {
+      name: 'get_share_url',
+      description:
+        'Compresses the live BeatDocument (BPM, scale, all marchers, Kolmogorov seeds, and holonomy curvature) into a zero-backend shareable #beat= URL cartridge.',
+      inputSchema: { type: 'object', properties: {} },
+      execute: async () => {
+        actions.onToolInvoked?.('get_share_url');
+        const res = await actions.getShareUrl();
+        return { ok: true, ...res };
+      },
     },
     {
       name: 'upsert_marcher',

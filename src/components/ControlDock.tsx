@@ -1,17 +1,24 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import {
+  Cable,
   Check,
   ChevronDown,
   ChevronUp,
   Copy,
+  Download,
+  Link2,
   Mic,
   Minus,
   Plus,
+  RotateCcw,
   Shuffle,
   Sparkles,
+  Square,
   Trash2,
+  Video,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import { MIDI47_LAYOUT_LABELS, Midi47LayoutId } from '../audio/midi47';
 import {
@@ -22,11 +29,13 @@ import {
   midiToNoteName,
   soundEngine,
 } from '../audio/soundEngine';
+import { BeatDropTiming } from '../mcp/webmcp';
 import { HudSnapshot } from '../scene/PlaygroundScene';
 import {
   BEAT_DOCUMENT_JSON_SCHEMA,
   BEAT_PRESETS,
   BeatDocument,
+  HolonomyConfig,
   INSTRUMENT_ROLES,
   INSTRUMENT_ROLE_LABELS,
   InstrumentRole,
@@ -50,9 +59,10 @@ import {
   encodeKolmogorov,
   generateRandomKolmogorovBrain,
 } from '../shared/protocol';
+import { EncodedCartridge } from '../shared/urlCartridge';
 import { Keyboard47 } from './Keyboard47';
 
-type DockTab = 'ensemble' | 'synth' | 'kolmogorov' | 'json';
+type DockTab = 'ensemble' | 'holonomy' | 'synth' | 'kolmogorov' | 'json';
 
 interface ControlDockProps {
   hud: HudSnapshot;
@@ -83,10 +93,29 @@ interface ControlDockProps {
   onTriggerKey47: (code: string, midi: number) => void;
   onGetBeatDocument: () => BeatDocument;
   onLoadBeatDocument: (doc: BeatDocument) => void;
+  onQueueBeatDrop: (doc: BeatDocument, timing: BeatDropTiming) => void;
+  onFlushPendingDrop: () => void;
+  onCancelPendingDrop: () => void;
+  onSetHolonomy: (patch: Partial<HolonomyConfig>) => void;
+  onAddCurvatureWell: (strength: number) => void;
+  onRemoveCurvatureWell: (id: string) => void;
+  onResetHolonomyPhase: () => void;
+  onCreateShareUrl: () => Promise<EncodedCartridge | null>;
+  onReconnectWebMidi: () => Promise<unknown>;
+  onSetMidiOutputPort: (portId: string | null) => void;
+  onSetMidiOutEnabled: (enabled: boolean) => void;
+  onToggleVideoRecording: () => Promise<unknown>;
+  onExportMidi: () => string;
 }
 
 function formatHz(hz: number): string {
   return hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${Math.round(hz)} Hz`;
+}
+
+function formatRecClock(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 export const ControlDock: React.FC<ControlDockProps> = ({
@@ -108,6 +137,19 @@ export const ControlDock: React.FC<ControlDockProps> = ({
   onTriggerKey47,
   onGetBeatDocument,
   onLoadBeatDocument,
+  onQueueBeatDrop,
+  onFlushPendingDrop,
+  onCancelPendingDrop,
+  onSetHolonomy,
+  onAddCurvatureWell,
+  onRemoveCurvatureWell,
+  onResetHolonomyPhase,
+  onCreateShareUrl,
+  onReconnectWebMidi,
+  onSetMidiOutputPort,
+  onSetMidiOutEnabled,
+  onToggleVideoRecording,
+  onExportMidi,
 }) => {
   const [collapsed, setCollapsed] = useState(false);
   const [activeTab, setActiveTab] = useState<DockTab>('ensemble');
@@ -120,11 +162,13 @@ export const ControlDock: React.FC<ControlDockProps> = ({
   const [spawnRole, setSpawnRole] = useState<InstrumentRole>('melody');
   const [spawnVariant, setSpawnVariant] = useState<string>(getDefaultVariantForRole('melody'));
 
-  // Beat JSON / WebMCP editor state
+  // Beat JSON / Studio / WebMCP editor state
   const [jsonDraft, setJsonDraft] = useState<string>('');
   const [jsonStatus, setJsonStatus] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
   const [copiedSchema, setCopiedSchema] = useState(false);
   const [copiedJson, setCopiedJson] = useState(false);
+  const [shareNote, setShareNote] = useState<string | null>(null);
+  const [dropTiming, setDropTiming] = useState<BeatDropTiming>('bar-8-fooof');
 
   const activeCodesSet = useMemo(() => new Set(hud.activeKeyCodes), [hud.activeKeyCodes]);
 
@@ -137,7 +181,7 @@ export const ControlDock: React.FC<ControlDockProps> = ({
       setJsonDraft(JSON.stringify(onGetBeatDocument(), null, 2));
       setJsonStatus(null);
     }
-  }, [activeTab, hud.dancerCount, hud.musicalClock.bpm, hud.beatScale]);
+  }, [activeTab, hud.dancerCount, hud.musicalClock.bpm, hud.beatScale, hud.holonomy.curvature, hud.holonomy.wells.length]);
 
   const handleSpawnRoleChange = (nextRole: InstrumentRole) => {
     setSpawnRole(nextRole);
@@ -236,7 +280,7 @@ export const ControlDock: React.FC<ControlDockProps> = ({
     onUpdateBrain({ ...base, seed: encodeKolmogorov(base) }, false);
   };
 
-  const handleApplyBeatJson = () => {
+  const handleApplyBeatJson = (mode: BeatDropTiming = 'now') => {
     try {
       const parsed = JSON.parse(jsonDraft);
       const res = validateBeatDocument(parsed);
@@ -244,17 +288,42 @@ export const ControlDock: React.FC<ControlDockProps> = ({
         setJsonStatus({ kind: 'err', text: res.errors.join(' ') });
         return;
       }
-      onLoadBeatDocument(res.document);
-      setJsonDraft(JSON.stringify(res.document, null, 2));
-      setJsonStatus({
-        kind: 'ok',
-        text: `Loaded "${res.document.title}" (${res.document.bpm} bpm, ${res.document.marchers.length} marchers)`,
-      });
+      if (mode === 'now') {
+        onLoadBeatDocument(res.document);
+        setJsonDraft(JSON.stringify(res.document, null, 2));
+        setJsonStatus({
+          kind: 'ok',
+          text: `Loaded "${res.document.title}" (${res.document.bpm} bpm, ${res.document.marchers.length} marchers)`,
+        });
+      } else {
+        onQueueBeatDrop(res.document, mode);
+        setJsonStatus({
+          kind: 'ok',
+          text: `Queued "${res.document.title}" for ${mode === 'bar-8-fooof' ? 'Bar-8 FOOOF!' : 'next bar'}`,
+        });
+      }
     } catch (err) {
       setJsonStatus({
         kind: 'err',
         text: err instanceof Error ? err.message : 'Invalid JSON syntax.',
       });
+    }
+  };
+
+  const handleShareCartridge = async () => {
+    const encoded = await onCreateShareUrl();
+    if (!encoded) return;
+    navigator.clipboard?.writeText(encoded.url);
+    const label = `${encoded.byteLength}B link copied`;
+    setShareNote(label);
+    setJsonStatus({ kind: 'ok', text: `Share cartridge updated (${encoded.byteLength} bytes in #beat= URL)` });
+    window.setTimeout(() => setShareNote(null), 2400);
+  };
+
+  const handleExportMidi = () => {
+    const filename = onExportMidi();
+    if (filename) {
+      setJsonStatus({ kind: 'ok', text: `Exported 8-bar multi-track MIDI: ${filename}` });
     }
   };
 
@@ -376,6 +445,33 @@ export const ControlDock: React.FC<ControlDockProps> = ({
               <Sparkles className="w-3.5 h-3.5 text-[#ff7a4d]" />
               <span>1·2·3 Boot</span>
             </button>
+
+            <button
+              type="button"
+              onClick={() => void onToggleVideoRecording()}
+              className={`hidden sm:flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+                hud.recorder.isRecording
+                  ? 'bg-[#ff5a26] hover:bg-[#e84b1a] text-white'
+                  : 'bg-white/8 hover:bg-white/14 text-slate-200'
+              }`}
+              title={
+                hud.recorder.isRecording
+                  ? 'Stop recording and download 60fps video'
+                  : 'Record 60fps WebGL + master audio video'
+              }
+            >
+              {hud.recorder.isRecording ? (
+                <>
+                  <Square className="w-3 h-3 fill-current" />
+                  <span>Stop {formatRecClock(hud.recorder.elapsedSec)}</span>
+                </>
+              ) : (
+                <>
+                  <Video className="w-3.5 h-3.5 text-slate-300" />
+                  <span>Rec</span>
+                </>
+              )}
+            </button>
           </div>
 
           {/* Right: Section Switcher & Audio Bus */}
@@ -384,9 +480,10 @@ export const ControlDock: React.FC<ControlDockProps> = ({
               {(
                 [
                   ['ensemble', 'Ensemble'],
+                  ['holonomy', 'Holonomy'],
                   ['synth', '47-Key Synth'],
                   ['kolmogorov', 'Kolmogorov'],
-                  ['json', 'Beat JSON · MCP'],
+                  ['json', 'Studio · MCP'],
                 ] as const
               ).map(([tabId, label]) => (
                 <button
@@ -452,6 +549,39 @@ export const ControlDock: React.FC<ControlDockProps> = ({
             />
           </div>
         </div>
+
+        {/* Inline Queued Bar-8 FOOOF! / Next-Bar Drop Strip */}
+        {hud.pendingDrop && (
+          <div className="flex flex-wrap items-center justify-between gap-2 px-3.5 py-1.5 bg-amber-500/14 border-b border-amber-300/25 text-xs">
+            <div className="flex items-center gap-2 text-amber-100 tabular-nums">
+              <span className="font-semibold text-amber-200">
+                Queued Drop: &ldquo;{hud.pendingDrop.title}&rdquo;
+              </span>
+              <span aria-hidden="true">·</span>
+              <span className="font-mono text-[11px] text-amber-200/90">
+                {hud.pendingDrop.timing === 'bar-8-fooof' ? 'On Bar-8 FOOOF!' : 'On Next Bar'} ({hud.pendingDrop.barsRemaining}{' '}
+                {hud.pendingDrop.barsRemaining === 1 ? 'bar' : 'bars'})
+              </span>
+            </div>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={onFlushPendingDrop}
+                className="px-2.5 py-0.5 rounded bg-[#ff5a26] hover:bg-[#e84b1a] text-white text-[11px] font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                Drop Now
+              </button>
+              <button
+                type="button"
+                onClick={onCancelPendingDrop}
+                aria-label="Cancel queued drop"
+                className="p-1 rounded bg-white/10 hover:bg-white/20 text-amber-100 transition-colors cursor-pointer"
+              >
+                <X className="w-3 h-3" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* Active Panel Body */}
         <div className="px-3.5 py-2.5">
@@ -699,6 +829,196 @@ export const ControlDock: React.FC<ControlDockProps> = ({
                   </div>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'holonomy' && (
+            <div className="space-y-2.5">
+              {/* Row 1: Manifold Curvature K, Presets & Berry Phase Readout */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => onSetHolonomy({ enabled: !hud.holonomy.enabled })}
+                    className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                      hud.holonomy.enabled
+                        ? 'bg-[#ff5a26] text-white'
+                        : 'bg-white/10 text-slate-300 hover:bg-white/18'
+                    }`}
+                  >
+                    {hud.holonomy.enabled ? 'Holonomy On' : 'Holonomy Off'}
+                  </button>
+
+                  <label className="flex items-center gap-2 px-2.5 py-1 rounded-md bg-white/[0.05] border border-white/10 text-xs tabular-nums">
+                    <span className="text-slate-400">Curvature K</span>
+                    <input
+                      type="range"
+                      aria-label="Manifold curvature K"
+                      min={-1}
+                      max={1}
+                      step={0.05}
+                      value={hud.holonomy.curvature}
+                      onChange={(e) =>
+                        onSetHolonomy({ enabled: true, curvature: Number(e.target.value) })
+                      }
+                      className="cube-slider w-24 sm:w-32"
+                    />
+                    <span className="font-mono text-sky-200 w-11 text-right">
+                      {hud.holonomy.curvature >= 0 ? '+' : ''}
+                      {hud.holonomy.curvature.toFixed(2)}
+                    </span>
+                  </label>
+
+                  <div className="flex items-center gap-1">
+                    {(
+                      [
+                        ['Flat 0', 0],
+                        ['Berry +0.35', 0.35],
+                        ['Trefoil +0.72', 0.72],
+                        ['Invert -0.55', -0.55],
+                      ] as const
+                    ).map(([label, val]) => (
+                      <button
+                        key={label}
+                        type="button"
+                        onClick={() => onSetHolonomy({ enabled: val !== 0, curvature: val })}
+                        className="px-2 py-1 rounded bg-white/8 hover:bg-white/16 text-[11px] font-medium text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs text-amber-200 tabular-nums px-2 py-1 rounded bg-white/[0.05] border border-white/10">
+                    θ = {hud.holonomyThetaDeg}°
+                  </span>
+                  <button
+                    type="button"
+                    onClick={onResetHolonomyPhase}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/8 hover:bg-white/16 text-xs text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    title="Reset accumulated Berry phase θ to 0°"
+                  >
+                    <RotateCcw className="w-3 h-3" />
+                    <span>Reset θ</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Row 2: Parallel-Transport Musical Actions */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/8 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onSetHolonomy({
+                        rhythmRotatePerOrbit: !hud.holonomy.rhythmRotatePerOrbit,
+                      })
+                    }
+                    className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                      hud.holonomy.rhythmRotatePerOrbit
+                        ? 'bg-sky-500/25 border border-sky-300/40 text-sky-100'
+                        : 'bg-white/8 border border-transparent text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Rotate 16-Step Rhythm: {hud.holonomy.rhythmRotatePerOrbit ? 'On' : 'Off'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      onSetHolonomy({
+                        harmonyTransposePerOrbit: !hud.holonomy.harmonyTransposePerOrbit,
+                      })
+                    }
+                    className={`px-2.5 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap cursor-pointer ${
+                      hud.holonomy.harmonyTransposePerOrbit
+                        ? 'bg-amber-500/25 border border-amber-300/40 text-amber-100'
+                        : 'bg-white/8 border border-transparent text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    Scale Parallel-Transport: {hud.holonomy.harmonyTransposePerOrbit ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                <label className="flex items-center gap-2 text-[11px] text-slate-300 tabular-nums">
+                  <span className="text-slate-400">Timbre Morph</span>
+                  <input
+                    type="range"
+                    aria-label="Holonomy timbre morph"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={hud.holonomy.timbreMorph}
+                    onChange={(e) => onSetHolonomy({ timbreMorph: Number(e.target.value) })}
+                    className="cube-slider w-20"
+                  />
+                  <span className="font-mono text-slate-200 w-8 text-right">
+                    {Math.round(hud.holonomy.timbreMorph * 100)}%
+                  </span>
+                </label>
+              </div>
+
+              {/* Row 3: Spatial Curvature Wells on the Campfire Floor */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={hud.holonomy.wells.length >= 4}
+                    onClick={() => onAddCurvatureWell(0.75)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-sky-500/20 hover:bg-sky-500/32 disabled:opacity-40 border border-sky-300/30 text-xs font-medium text-sky-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Positive Well (+K)</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={hud.holonomy.wells.length >= 4}
+                    onClick={() => onAddCurvatureWell(-0.75)}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-orange-500/20 hover:bg-orange-500/32 disabled:opacity-40 border border-orange-300/30 text-xs font-medium text-orange-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:cursor-not-allowed"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>Negative Well (-K)</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {hud.holonomy.wells.length === 0 ? (
+                    <span className="text-[11px] text-slate-400">
+                      No local wells · Add up to 4 crystal curvature spires around the ring
+                    </span>
+                  ) : (
+                    hud.holonomy.wells.map((w, idx) => {
+                      const deg = Math.round((w.angle * 180) / Math.PI);
+                      const isPos = w.strength >= 0;
+                      return (
+                        <div
+                          key={w.id}
+                          className={`flex items-center gap-1.5 px-2 py-0.5 rounded border text-[11px] font-mono tabular-nums ${
+                            isPos
+                              ? 'bg-sky-500/14 border-sky-300/30 text-sky-100'
+                              : 'bg-orange-500/14 border-orange-300/30 text-orange-100'
+                          }`}
+                        >
+                          <span>
+                            W{idx + 1} {deg}° · {isPos ? '+' : ''}
+                            {w.strength.toFixed(2)}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => onRemoveCurvatureWell(w.id)}
+                            aria-label={`Remove well ${idx + 1}`}
+                            className="hover:text-white cursor-pointer"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
             </div>
           )}
 
@@ -1020,16 +1340,48 @@ export const ControlDock: React.FC<ControlDockProps> = ({
 
           {activeTab === 'json' && (
             <div className="space-y-2">
+              {/* Row 1: Presets with Bar-8 FOOOF! Quantized Drop Mode + Share / Capture */}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex flex-wrap items-center gap-1.5">
+                  <div className="flex items-center p-0.5 rounded-md bg-white/8 text-[11px]">
+                    {(
+                      [
+                        ['now', 'Load Now'],
+                        ['bar-8-fooof', 'Bar-8 FOOOF!'],
+                        ['next-bar', 'Next Bar'],
+                      ] as const
+                    ).map(([timing, label]) => (
+                      <button
+                        key={timing}
+                        type="button"
+                        onClick={() => setDropTiming(timing)}
+                        className={`px-2 py-0.5 rounded font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                          dropTiming === timing
+                            ? 'bg-amber-400 text-[#141822] font-semibold'
+                            : 'text-slate-300 hover:text-white'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
                   {Object.entries(BEAT_PRESETS).map(([key, preset]) => (
                     <button
                       key={key}
                       type="button"
                       onClick={() => {
-                        onLoadBeatDocument(preset);
                         setJsonDraft(JSON.stringify(preset, null, 2));
-                        setJsonStatus({ kind: 'ok', text: `Loaded preset "${preset.title}"` });
+                        if (dropTiming === 'now') {
+                          onLoadBeatDocument(preset);
+                          setJsonStatus({ kind: 'ok', text: `Loaded "${preset.title}"` });
+                        } else {
+                          onQueueBeatDrop(preset, dropTiming);
+                          setJsonStatus({
+                            kind: 'ok',
+                            text: `Queued "${preset.title}" for ${dropTiming === 'bar-8-fooof' ? 'Bar-8 FOOOF!' : 'next bar'}`,
+                          });
+                        }
                       }}
                       className="px-2.5 py-1 rounded-md bg-white/8 hover:bg-white/16 text-xs text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                     >
@@ -1041,11 +1393,111 @@ export const ControlDock: React.FC<ControlDockProps> = ({
                 <div className="flex flex-wrap items-center gap-1.5">
                   <button
                     type="button"
+                    onClick={() => void handleShareCartridge()}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/18 text-xs font-medium text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    title="Compress entire beat + holonomy into a shareable #beat= URL cartridge"
+                  >
+                    <Link2 className="w-3.5 h-3.5 text-sky-300" />
+                    <span>{shareNote ?? 'Share #beat= Link'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => void onToggleVideoRecording()}
+                    className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer tabular-nums ${
+                      hud.recorder.isRecording
+                        ? 'bg-[#ff5a26] hover:bg-[#e84b1a] text-white'
+                        : 'bg-white/10 hover:bg-white/18 text-slate-100'
+                    }`}
+                  >
+                    {hud.recorder.isRecording ? (
+                      <>
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>Stop {formatRecClock(hud.recorder.elapsedSec)}</span>
+                      </>
+                    ) : (
+                      <>
+                        <Video className="w-3.5 h-3.5 text-[#ff7a4d]" />
+                        <span>Record Video</span>
+                      </>
+                    )}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleExportMidi}
+                    className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/18 text-xs font-medium text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                    title="Export 8-bar Format-1 multi-track Standard MIDI File (GM Ch 10 drums + Ch 1-3 singers)"
+                  >
+                    <Download className="w-3.5 h-3.5 text-amber-300" />
+                    <span>Export .mid</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Row 2: Two-Way Hardware WebMIDI In/Out Hub */}
+              <div className="flex flex-wrap items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-white/[0.04] border border-white/8 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => void onReconnectWebMidi()}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-white/10 hover:bg-white/18 text-xs font-medium text-slate-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    <Cable className="w-3.5 h-3.5 text-emerald-300" />
+                    <span>
+                      {hud.midiHub.connected
+                        ? `WebMIDI (${hud.midiHub.inputs.length} in · ${hud.midiHub.outputs.length} out)`
+                        : hud.midiHub.supported
+                          ? 'Connect WebMIDI'
+                          : 'WebMIDI Unavailable'}
+                    </span>
+                  </button>
+
+                  {hud.midiHub.outputs.length > 0 && (
+                    <select
+                      aria-label="MIDI output port"
+                      value={hud.midiHub.selectedOutputId ?? ''}
+                      onChange={(e) => onSetMidiOutputPort(e.target.value || null)}
+                      className="px-2 py-1 rounded bg-[#1e2433] border border-white/12 text-xs text-slate-200 focus:outline-none focus:border-[#ff5a26]"
+                    >
+                      <option value="">Select MIDI Out...</option>
+                      {hud.midiHub.outputs.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+
+                  <button
+                    type="button"
+                    disabled={hud.midiHub.outputs.length === 0}
+                    onClick={() => onSetMidiOutEnabled(!hud.midiHub.midiOutEnabled)}
+                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors whitespace-nowrap shrink-0 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
+                      hud.midiHub.midiOutEnabled
+                        ? 'bg-emerald-500/25 border border-emerald-300/40 text-emerald-100'
+                        : 'bg-white/8 text-slate-300 hover:text-white'
+                    }`}
+                  >
+                    MIDI Out: {hud.midiHub.midiOutEnabled ? 'On' : 'Off'}
+                  </button>
+                </div>
+
+                <span className="font-mono text-[11px] text-slate-400 truncate max-w-[340px]">
+                  {hud.midiHub.lastMessage ?? 'CC#74 Cutoff · CC#71 Res · CC#72 Rel · CC#1 Curvature'}
+                </span>
+              </div>
+
+              {/* Row 3: Beat JSON Editor + Apply / Queue Actions */}
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
                     onClick={handleCopySchema}
                     className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/8 hover:bg-white/16 text-xs text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {copiedSchema ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedSchema ? 'Copied Schema' : 'Copy JSON Schema'}</span>
+                    <span>{copiedSchema ? 'Copied Schema' : 'Copy Schema'}</span>
                   </button>
                   <button
                     type="button"
@@ -1053,14 +1505,24 @@ export const ControlDock: React.FC<ControlDockProps> = ({
                     className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/8 hover:bg-white/16 text-xs text-slate-200 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
                     {copiedJson ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-                    <span>{copiedJson ? 'Copied Beat' : 'Copy Beat JSON'}</span>
+                    <span>{copiedJson ? 'Copied Beat' : 'Copy JSON'}</span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleApplyBeatJson('bar-8-fooof')}
+                    className="px-2.5 py-1 rounded-md bg-amber-400/20 hover:bg-amber-400/32 border border-amber-300/35 text-xs font-medium text-amber-100 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+                  >
+                    Queue Bar-8 Drop
                   </button>
                   <button
                     type="button"
-                    onClick={handleApplyBeatJson}
+                    onClick={() => handleApplyBeatJson('now')}
                     className="px-3 py-1 rounded-md bg-[#ff5a26] hover:bg-[#e84b1a] text-xs font-semibold text-white transition-colors whitespace-nowrap shrink-0 cursor-pointer"
                   >
-                    Apply Beat JSON
+                    Apply Now
                   </button>
                   <button
                     type="button"
@@ -1076,7 +1538,7 @@ export const ControlDock: React.FC<ControlDockProps> = ({
                 aria-label="Beat JSON Document"
                 value={jsonDraft}
                 onChange={(e) => setJsonDraft(e.target.value)}
-                rows={5}
+                rows={4}
                 spellCheck={false}
                 className="w-full px-2.5 py-2 rounded-lg bg-[#0d1119] border border-white/10 font-mono text-[11px] leading-relaxed text-slate-200 focus:outline-none focus:border-[#ff5a26] resize-y"
               />
@@ -1098,9 +1560,17 @@ export const ControlDock: React.FC<ControlDockProps> = ({
                   )}
                 </div>
 
-                {jsonStatus && (
-                  <span className={jsonStatus.kind === 'err' ? 'text-red-300' : 'text-emerald-300'}>
-                    {jsonStatus.text}
+                {(jsonStatus || hud.recorder.error || hud.recorder.lastSavedFilename) && (
+                  <span
+                    className={
+                      hud.recorder.error || jsonStatus?.kind === 'err'
+                        ? 'text-red-300'
+                        : 'text-emerald-300'
+                    }
+                  >
+                    {hud.recorder.error ??
+                      jsonStatus?.text ??
+                      (hud.recorder.lastSavedFilename ? `Saved ${hud.recorder.lastSavedFilename}` : '')}
                   </span>
                 )}
               </div>

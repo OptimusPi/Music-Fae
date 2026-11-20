@@ -140,11 +140,37 @@ export interface BeatMarcherSpec {
   visuals?: BeatMarcherVisuals;
 }
 
+export interface HolonomyCurvatureWell {
+  id: string;
+  angle: number;    // 0..2π radians around the campfire
+  radius: number;   // 5.8..10.5 ring radius
+  strength: number; // -1..1 signed local curvature bump
+}
+
+export interface HolonomyConfig {
+  enabled: boolean;
+  curvature: number; // -1..1 global manifold curvature K (Berry phase Δθ per orbit)
+  rhythmRotatePerOrbit: boolean;
+  harmonyTransposePerOrbit: boolean;
+  timbreMorph: number; // 0..1 sin(θ) filter/warmth modulation
+  wells: HolonomyCurvatureWell[]; // up to 4 localized curvature wells on the mossy floor
+}
+
+export const DEFAULT_HOLONOMY: HolonomyConfig = {
+  enabled: true,
+  curvature: 0,
+  rhythmRotatePerOrbit: true,
+  harmonyTransposePerOrbit: true,
+  timbreMorph: 0.45,
+  wells: [],
+};
+
 export interface BeatDocument {
   version: '1.0';
   title: string;
   bpm: number; // 60..180 (controls tempo AND 0.2*bpm walking animation FPS)
   scale: MusicalScaleId;
+  holonomy?: HolonomyConfig;
   marchers: BeatMarcherSpec[];
 }
 
@@ -204,6 +230,7 @@ export const DEFAULT_BEAT_DOCUMENT: BeatDocument = {
   title: 'Drei Stars Hearth',
   bpm: DEFAULT_BPM,
   scale: 'D-lydian',
+  holonomy: { ...DEFAULT_HOLONOMY, wells: [] },
   marchers: [
     // 4 Drum Marchers (each marcher IS one instrument)
     {
@@ -495,6 +522,32 @@ export const BEAT_DOCUMENT_JSON_SCHEMA = {
       enum: ['D-lydian', 'A-minor', 'F-major', 'E-dorian', 'C-pentatonic'],
       default: 'D-lydian',
     },
+    holonomy: {
+      type: 'object',
+      description:
+        'Parallel-transport holonomy sequencer configuration. Non-zero curvature K accumulates Berry phase θ around closed campfire orbits to rotate 16-step rhythms, transpose singers within scale, and morph filter warmth.',
+      properties: {
+        enabled: { type: 'boolean', default: true },
+        curvature: { type: 'number', minimum: -1, maximum: 1, default: 0 },
+        rhythmRotatePerOrbit: { type: 'boolean', default: true },
+        harmonyTransposePerOrbit: { type: 'boolean', default: true },
+        timbreMorph: { type: 'number', minimum: 0, maximum: 1, default: 0.45 },
+        wells: {
+          type: 'array',
+          maxItems: 4,
+          items: {
+            type: 'object',
+            required: ['angle', 'radius', 'strength'],
+            properties: {
+              id: { type: 'string' },
+              angle: { type: 'number', minimum: 0, maximum: 6.29 },
+              radius: { type: 'number', minimum: 5.5, maximum: 10.8 },
+              strength: { type: 'number', minimum: -1, maximum: 1 },
+            },
+          },
+        },
+      },
+    },
     marchers: {
       type: 'array',
       minItems: 1,
@@ -691,6 +744,38 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
     return { ok: false, errors: errors.length > 0 ? errors : ['No valid marchers found in beat JSON.'] };
   }
 
+  let holonomy: HolonomyConfig | undefined;
+  if (obj.holonomy && typeof obj.holonomy === 'object') {
+    const h = obj.holonomy as Record<string, unknown>;
+    const rawCurv = Number(h.curvature ?? 0);
+    const rawMorph = Number(h.timbreMorph ?? 0.45);
+    const wells: HolonomyCurvatureWell[] = [];
+    if (Array.isArray(h.wells)) {
+      for (let i = 0; i < Math.min(4, h.wells.length); i++) {
+        const w = h.wells[i] as Record<string, unknown> | null;
+        if (!w || typeof w !== 'object') continue;
+        const angle = Number(w.angle ?? 0);
+        const radius = Number(w.radius ?? 8.3);
+        const strength = Number(w.strength ?? 0.65);
+        if (!Number.isFinite(angle) || !Number.isFinite(radius) || !Number.isFinite(strength)) continue;
+        wells.push({
+          id: typeof w.id === 'string' && w.id.trim() ? w.id.trim().slice(0, 24) : `well-${i + 1}`,
+          angle: Number(((((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2))).toFixed(3)),
+          radius: Number(Math.max(5.5, Math.min(10.8, radius)).toFixed(2)),
+          strength: Number(Math.max(-1, Math.min(1, strength)).toFixed(2)),
+        });
+      }
+    }
+    holonomy = {
+      enabled: h.enabled !== undefined ? Boolean(h.enabled) : true,
+      curvature: Number(Math.max(-1, Math.min(1, Number.isFinite(rawCurv) ? rawCurv : 0)).toFixed(2)),
+      rhythmRotatePerOrbit: h.rhythmRotatePerOrbit !== undefined ? Boolean(h.rhythmRotatePerOrbit) : true,
+      harmonyTransposePerOrbit: h.harmonyTransposePerOrbit !== undefined ? Boolean(h.harmonyTransposePerOrbit) : true,
+      timbreMorph: Number(Math.max(0, Math.min(1, Number.isFinite(rawMorph) ? rawMorph : 0.45)).toFixed(2)),
+      wells,
+    };
+  }
+
   return {
     ok: errors.length === 0,
     document: {
@@ -698,6 +783,7 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
       title,
       bpm,
       scale,
+      ...(holonomy ? { holonomy } : {}),
       marchers,
     },
     errors,
@@ -780,7 +866,8 @@ export function exportBeatDocumentFromCharacters(
   characters: Iterable<import('./protocol').CharacterState>,
   bpm: number,
   scale: MusicalScaleId,
-  title = 'Drei Stars Hearth'
+  title = 'Drei Stars Hearth',
+  holonomy?: HolonomyConfig
 ): BeatDocument {
   const marchers: BeatMarcherSpec[] = [];
   for (const ch of characters) {
@@ -806,6 +893,7 @@ export function exportBeatDocumentFromCharacters(
     title,
     bpm: Math.round(Math.max(MIN_BPM, Math.min(MAX_BPM, bpm))),
     scale,
+    ...(holonomy ? { holonomy: { ...holonomy, wells: holonomy.wells.map((w) => ({ ...w })) } } : {}),
     marchers,
   };
 }

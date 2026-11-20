@@ -702,7 +702,8 @@ export class CharacterRig {
     nowMs: number,
     audio: AudioBands,
     clock: MusicalClock,
-    delta: number
+    delta: number,
+    holonomyTheta = 0
   ): void {
     this.root.position.set(state.x, state.y, state.z);
     this.root.rotation.y = state.yaw;
@@ -910,19 +911,23 @@ export class CharacterRig {
     this.hitMesh.scale.set(hitScaleXZ, hitScaleY, hitScaleXZ);
     this.hitMesh.position.y = 1.7 + this.stageExpand * 1.65;
 
-    // Internal geodesic holonomy loops visible inside giant crystal head
-    const showHolonomy = this.stageExpand > 0.08;
+    // Internal geodesic holonomy loops visible inside crystal head (shows live Berry-phase precession!)
+    const hasHolonomyTwist = Math.abs(holonomyTheta) > 0.04;
+    const showHolonomy = this.stageExpand > 0.08 || hasHolonomyTwist;
     this.holonomyLoopA.visible = showHolonomy;
-    this.holonomyLoopB.visible = showHolonomy;
+    this.holonomyLoopB.visible = this.stageExpand > 0.08 || Math.abs(holonomyTheta) > 0.35;
     if (showHolonomy) {
-      const holoAngle = elapsedSec * (0.35 + state.brain.complexity * 0.75) + state.orbitAngle;
-      this.holonomyLoopA.rotation.set(holoAngle * 0.6, holoAngle, 0.35);
-      this.holonomyLoopB.rotation.set(Math.PI / 2 - holoAngle * 0.45, 0.4, holoAngle * 0.8);
-      this.holonomyMat.opacity = this.stageExpand * (0.24 + this.vfxPulse * 0.28);
+      const holoAngle = elapsedSec * (0.35 + state.brain.complexity * 0.75) + state.orbitAngle + holonomyTheta;
+      this.holonomyLoopA.rotation.set(holoAngle * 0.6 + holonomyTheta * 0.5, holoAngle, 0.35 + holonomyTheta * 0.4);
+      this.holonomyLoopB.rotation.set(Math.PI / 2 - holoAngle * 0.45, 0.4 + holonomyTheta, holoAngle * 0.8);
+      const baseVis = Math.max(this.stageExpand, hasHolonomyTwist ? 0.42 : 0);
+      this.holonomyMat.opacity = baseVis * (0.26 + this.vfxPulse * 0.28);
       this.holonomyMat.color.setHSL(
-        this.vfxPulse > 0.15 ? ((((this.vfxHue % 360) + 360) % 360) / 360) : state.brain.accentHue / 360,
-        0.75,
-        0.52
+        this.vfxPulse > 0.15
+          ? ((((this.vfxHue % 360) + 360) % 360) / 360)
+          : ((((state.brain.accentHue + (holonomyTheta * 180) / Math.PI) % 360) + 360) % 360) / 360,
+        0.78,
+        0.54
       );
     }
 
@@ -967,8 +972,8 @@ export class CharacterRig {
         }
       }
 
-      // Holonomy twist: internal brain fiber rotates smoothly with loop angle & complexity
-      const holonomyPhase = (state.orbitAngle * (1 + complexity * 2) + state.yaw * 0.5) * 0.35;
+      // Holonomy twist: internal brain fiber rotates smoothly with accumulated Berry-phase holonomy θ
+      const holonomyPhase = (state.orbitAngle * (1 + complexity * 2) + state.yaw * 0.5) * 0.35 + holonomyTheta;
       const orbitPhase =
         elapsedSec * sp.orbitSpeed * (0.85 + complexity * 0.65) +
         i * ((Math.PI * 2) / 3) +

@@ -123,14 +123,21 @@ export class DreiStars {
     star.pulse = Math.max(star.pulse, Math.min(1.5, strength));
   }
 
-  public update(elapsedSec: number, dt: number, audio: AudioBands, clock: MusicalClock): void {
+  public update(
+    elapsedSec: number,
+    dt: number,
+    audio: AudioBands,
+    clock: MusicalClock,
+    dropUrgency = 0
+  ): void {
     const isFooof = clock.campfireBeat === 7;
     const fooofLift = isFooof ? Math.sin(Math.min(1, clock.beatPhase * 1.6) * Math.PI) : 0;
     const breakLift = clock.isBreakBar ? Math.sin(clock.breakProgress * Math.PI) : 0;
+    const dropPulse = dropUrgency > 0.01 ? dropUrgency * (0.5 + 0.5 * Math.sin(elapsedSec * (5 + dropUrgency * 8))) : 0;
 
-    // Gentle BPM-linked constellation rotation
-    const orbitBase = clock.exactBeats * 0.14;
-    const radius = 3.55 + fooofLift * 0.42 + breakLift * 0.55;
+    // Gentle BPM-linked constellation rotation (accelerates subtly when a Bar-8 drop is queued)
+    const orbitBase = clock.exactBeats * (0.14 + dropUrgency * 0.12);
+    const radius = 3.55 + fooofLift * 0.42 + breakLift * 0.55 - dropUrgency * 0.32;
 
     for (let i = 0; i < this.stars.length; i++) {
       const s = this.stars[i];
@@ -138,7 +145,7 @@ export class DreiStars {
 
       const ang = s.baseAngle + orbitBase;
       const sx = Math.cos(ang) * radius;
-      const sy = Math.sin(elapsedSec * 1.15 + i * 2.1) * 0.34 + fooofLift * 0.35 + s.pulse * 0.22;
+      const sy = Math.sin(elapsedSec * 1.15 + i * 2.1) * 0.34 + fooofLift * 0.35 + s.pulse * 0.22 + dropPulse * 0.2;
       const sz = Math.sin(ang) * radius;
 
       s.group.position.set(sx, sy, sz);
@@ -146,7 +153,7 @@ export class DreiStars {
       this.trianglePositions[i * 3 + 1] = sy;
       this.trianglePositions[i * 3 + 2] = sz;
 
-      const scale = 0.92 + s.pulse * 0.42 + fooofLift * 0.26 + audio.beatPulse * 0.1;
+      const scale = 0.92 + s.pulse * 0.42 + fooofLift * 0.26 + audio.beatPulse * 0.1 + dropPulse * 0.24;
       s.group.scale.setScalar(scale);
 
       s.coreMesh.rotation.y = elapsedSec * (0.9 + i * 0.2) + s.pulse * 1.6;
@@ -154,13 +161,17 @@ export class DreiStars {
       s.haloMesh.rotation.z = elapsedSec * (1.1 + i * 0.25);
       s.haloMesh.rotation.x = Math.PI / 2.3 + Math.sin(elapsedSec * 0.8 + i) * 0.32;
 
-      s.coreMat.emissiveIntensity = 1.0 + s.pulse * 1.85 + fooofLift * 0.95 + breakLift * 0.7;
-      s.haloMat.opacity = Math.min(0.95, 0.38 + s.pulse * 0.5 + fooofLift * 0.3);
+      s.coreMat.emissiveIntensity = 1.0 + s.pulse * 1.85 + fooofLift * 0.95 + breakLift * 0.7 + dropPulse * 1.25;
+      s.haloMat.opacity = Math.min(0.95, 0.38 + s.pulse * 0.5 + fooofLift * 0.3 + dropPulse * 0.35);
     }
 
     const posAttr = this.triangleLine.geometry.getAttribute('position') as THREE.BufferAttribute;
     posAttr.needsUpdate = true;
-    this.triangleMat.opacity = 0.22 + fooofLift * 0.35 + breakLift * 0.25 + audio.beatPulse * 0.12;
+    this.triangleMat.color.setHex(dropUrgency > 0.05 ? 0xfbbf24 : 0xbfe7ff);
+    this.triangleMat.opacity = Math.min(
+      0.92,
+      0.22 + fooofLift * 0.35 + breakLift * 0.25 + audio.beatPulse * 0.12 + dropPulse * 0.45
+    );
   }
 
   public dispose(): void {
