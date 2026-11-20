@@ -1,0 +1,16 @@
+name = "clear-cube-playground"
+main = "party/playground.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+[assets]
+directory = "./dist"
+binding = "ASSETS"
+
+[[durable_objects.bindings]]
+name = "PLAYGROUND_ROOM"
+class_name = "PlaygroundRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PlaygroundRoom"]

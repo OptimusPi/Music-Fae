@@ -1,0 +1,10 @@
+{
+  "name": "Clear Cube Playground",
+  "description": "A 3D multiplayer PSX-inspired playground where quirky 24 FPS low-poly triangle characters with clear cube heads and music-reactive 3-shape Kolmogorov brains fly, script walks, march in eternal circles when abandoned, and boot up with warm lo-fi synth chords.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
