@@ -1,21 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
-import { DANCE_BREAK_LABELS, soundEngine } from './audio/soundEngine';
+import { soundEngine } from './audio/soundEngine';
 import { ControlDock } from './components/ControlDock';
 import { HudSnapshot, PlaygroundScene } from './scene/PlaygroundScene';
 import {
   DEFAULT_BEAT_DOCUMENT,
   DEFAULT_BPM,
-  DEFAULT_HOLONOMY,
-  INSTRUMENT_ROLE_LABELS,
   bpmToAnimFps,
 } from './shared/beatSchema';
 import { decodeKolmogorov } from './shared/protocol';
-
-function formatRecTime(sec: number): string {
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
-}
 
 const INITIAL_HUD: HudSnapshot = {
   connectionStatus: 'connecting',
@@ -24,13 +16,10 @@ const INITIAL_HUD: HudSnapshot = {
   stagedId: null,
   stagedLabel: null,
   stagedCharacter: null,
-  stagedBrain: decodeKolmogorov('CRYSTAL-FAE-HEARTH'),
+  stagedBrain: decodeKolmogorov('sunny-moss'),
   marchers: [],
   beatTitle: DEFAULT_BEAT_DOCUMENT.title,
   beatScale: DEFAULT_BEAT_DOCUMENT.scale,
-  holonomy: { ...DEFAULT_HOLONOMY, wells: [] },
-  holonomyThetaDeg: 0,
-  pendingDrop: null,
   audioBands: { bass: 0.2, mid: 0.2, treble: 0.2, overall: 0.2, beatPulse: 0 },
   musicalClock: {
     bpm: DEFAULT_BPM,
@@ -52,7 +41,7 @@ const INITIAL_HUD: HudSnapshot = {
   midiLayout: 'vmpk',
   activeKeyCodes: [],
   lastMidiNote: null,
-  recordStepIndex: null,
+  recordTarget: null,
   midiHub: {
     supported: false,
     connected: false,
@@ -68,7 +57,6 @@ const INITIAL_HUD: HudSnapshot = {
     lastSavedFilename: null,
     error: null,
   },
-  webMcp: { nativeAvailable: false, toolNames: [], lastCall: null },
 };
 
 export default function App() {
@@ -100,15 +88,8 @@ export default function App() {
     };
   }, []);
 
-  const clock = hud.musicalClock;
-  const staged = hud.stagedId ? hud.stagedCharacter : null;
-  const holonomyActive =
-    hud.holonomy.enabled &&
-    (Math.abs(hud.holonomy.curvature) > 0.01 || hud.holonomy.wells.length > 0);
-
   return (
     <main className="relative w-full h-full overflow-hidden bg-[#111a28]">
-      {/* Isolated WebGL Viewport */}
       <div
         ref={canvasMountRef}
         className="fixed inset-0 w-full h-full cursor-grab active:cursor-grabbing"
@@ -123,97 +104,33 @@ export default function App() {
         </div>
       )}
 
-      {/* Unboxed Moonlit Header */}
-      <header className="fixed top-5 left-6 z-10 pointer-events-none select-none">
-        <h1 className="font-display text-xl sm:text-2xl font-bold tracking-tight text-slate-100">
-          Drei Stars · Clear Cube
-        </h1>
-        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs font-medium text-slate-300 tabular-nums">
-          <span>{hud.dancerCount} Marchers</span>
-          <span aria-hidden="true">·</span>
-          <span>{clock.bpm} bpm</span>
-          <span aria-hidden="true">·</span>
-          <span>{clock.animFps.toFixed(1)} fps</span>
-          <span aria-hidden="true">·</span>
-          <span className={clock.isBreakBar ? 'text-amber-300 font-semibold' : ''}>
-            {clock.isBreakBar
-              ? `Bar 8/8 · ${DANCE_BREAK_LABELS[clock.breakStyle]}`
-              : `Bar ${clock.barInPhrase}/8`}
-          </span>
-          {holonomyActive && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono text-sky-300">
-                θ {hud.holonomyThetaDeg}°
-              </span>
-            </>
-          )}
-          {hud.pendingDrop && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="text-amber-300 font-semibold">
-                Drop &ldquo;{hud.pendingDrop.title}&rdquo; in {hud.pendingDrop.barsRemaining}b
-              </span>
-            </>
-          )}
-          {hud.recorder.isRecording && (
-            <>
-              <span aria-hidden="true">·</span>
-              <span className="font-mono text-[#ff7a4d] font-semibold">
-                Rec {formatRecTime(hud.recorder.elapsedSec)}
-              </span>
-            </>
-          )}
-          <span aria-hidden="true">·</span>
-          <span className={staged ? 'font-mono text-amber-200' : 'text-slate-400'}>
-            {staged
-              ? `${staged.label} · ${INSTRUMENT_ROLE_LABELS[staged.role]} (${staged.variant})`
-              : 'Click any head to stage'}
-          </span>
-        </div>
-      </header>
-
-      {/* Unified Collapsible Studio Instrument, Holonomy, Ensemble & WebMCP Console */}
       <ControlDock
         hud={hud}
         onSetBpm={(bpm) => sceneRef.current?.setBpm(bpm)}
         onSetScale={(scale) => sceneRef.current?.setBeatScale(scale)}
         onSpawnMarcher={(role, variant) => sceneRef.current?.spawnMarcher(role, variant)}
         onStageMarcher={(id) => sceneRef.current?.stageCharacter(id)}
-        onStageNext={() => sceneRef.current?.stageNextDancer()}
         onRemoveMarcher={(id) => sceneRef.current?.removeMarcherById(id)}
         onUpdateMarcherInstrument={(id, patch) =>
           sceneRef.current?.updateMarcherInstrument(id, patch)
         }
-        onToggleStep={(idx) => sceneRef.current?.toggleStagedStep(idx)}
-        onSetRecordStep={(idx) => sceneRef.current?.setRecordStepIndex(idx)}
+        onSetMarcherStep={(id, idx, active) =>
+          sceneRef.current?.setMarcherStep(id, idx, active)
+        }
+        onNudgeMarcherNote={(id, idx, delta) =>
+          sceneRef.current?.nudgeMarcherStepNote(id, idx, delta)
+        }
+        onClearAllSteps={() => sceneRef.current?.clearAllSteps()}
+        onSetRecordTarget={(target) => sceneRef.current?.setRecordTarget(target)}
         onUpdateBrain={(brain, replayBoot) =>
           sceneRef.current?.updateStagedBrain(brain, replayBoot)
         }
-        onTriggerBoot={() => sceneRef.current?.triggerBootSequence()}
-        onClearRing={() => sceneRef.current?.clearRing()}
-        onCameraPreset={(preset) => sceneRef.current?.setCameraPreset(preset)}
         onMidiLayoutChange={(layout) => sceneRef.current?.setMidiLayout(layout)}
         onTriggerKey47={(code, midi) => sceneRef.current?.triggerKey47FromPointer(code, midi)}
-        onGetBeatDocument={() =>
-          sceneRef.current?.getBeatDocument() ?? DEFAULT_BEAT_DOCUMENT
-        }
         onLoadBeatDocument={(doc) => sceneRef.current?.loadBeatDocument(doc)}
-        onQueueBeatDrop={(doc, timing) => sceneRef.current?.queueBeatDrop(doc, timing)}
-        onFlushPendingDrop={() => sceneRef.current?.flushPendingDropNow()}
-        onCancelPendingDrop={() => sceneRef.current?.cancelPendingDrop()}
-        onSetHolonomy={(patch) => sceneRef.current?.setHolonomy(patch)}
-        onAddCurvatureWell={(strength) => sceneRef.current?.addCurvatureWell(strength)}
-        onRemoveCurvatureWell={(id) => sceneRef.current?.removeCurvatureWell(id)}
-        onResetHolonomyPhase={() => sceneRef.current?.resetHolonomyPhase()}
         onCreateShareUrl={() =>
           sceneRef.current ? sceneRef.current.createShareCartridgeUrl() : Promise.resolve(null)
         }
-        onReconnectWebMidi={() =>
-          sceneRef.current ? sceneRef.current.reconnectWebMidi() : Promise.resolve()
-        }
-        onSetMidiOutputPort={(id) => sceneRef.current?.setMidiOutputPort(id)}
-        onSetMidiOutEnabled={(enabled) => sceneRef.current?.setMidiOutEnabled(enabled)}
         onToggleVideoRecording={() =>
           sceneRef.current ? sceneRef.current.toggleVideoRecording() : Promise.resolve()
         }

@@ -43,36 +43,6 @@ function buildMidiTrackChunk(events: Array<{ tick: number; data: number[] }>): n
   return [...asciiBytes('MTrk'), ...writeU32(body.length), ...body];
 }
 
-function transposeMidiInScale(
-  midi: number,
-  degreeShift: number,
-  scaleId: BeatDocument['scale']
-): number {
-  if (degreeShift === 0) return midi;
-  const spec = SCALE_INTERVALS[scaleId] ?? SCALE_INTERVALS['D-lydian'];
-  const intervals = spec.intervals;
-  const rootPitchClass = spec.rootMidi % 12;
-  const rel = midi - rootPitchClass;
-  const oct = Math.floor(rel / 12);
-  const pc = ((rel % 12) + 12) % 12;
-
-  let bestIdx = 0;
-  let bestDist = 99;
-  for (let i = 0; i < intervals.length; i++) {
-    const d = Math.abs(intervals[i] - pc);
-    if (d < bestDist) {
-      bestDist = d;
-      bestIdx = i;
-    }
-  }
-
-  const totalDeg = bestIdx + degreeShift;
-  const octDelta = Math.floor(totalDeg / intervals.length);
-  const nextIdx = ((totalDeg % intervals.length) + intervals.length) % intervals.length;
-  const nextMidi = rootPitchClass + (oct + octDelta) * 12 + intervals[nextIdx];
-  return Math.max(24, Math.min(108, nextMidi));
-}
-
 const DRUM_NOTE_MAP: Record<string, number> = {
   kick: 36,
   snare: 38,
@@ -81,9 +51,8 @@ const DRUM_NOTE_MAP: Record<string, number> = {
 };
 
 /**
- * Generates a real DAW-ready multi-track Standard MIDI File (.mid, Format 1, 480 PPQ)
- * exporting 8 bars of all active drum (Ch 10) & singer (Ch 1..3) marchers,
- * including holonomy step-rotation & diatonic parallel-transport evolution!
+ * Generates a multi-track Standard MIDI File (.mid, Format 1, 480 PPQ)
+ * exporting 8 bars of all active drum (Ch 10) & singer (Ch 1..3) marchers.
  */
 export function buildStandardMidiFile(doc: BeatDocument, bars = 8): Uint8Array {
   const ppq = 480;
@@ -104,11 +73,6 @@ export function buildStandardMidiFile(doc: BeatDocument, bars = 8): Uint8Array {
   ];
   tracks.push(buildMidiTrackChunk(conductorEvents));
 
-  const holonomy = doc.holonomy;
-  const holonomyActive = Boolean(
-    holonomy?.enabled && (Math.abs(holonomy.curvature) > 0.01 || (holonomy.wells?.length ?? 0) > 0)
-  );
-
   // One track per active marcher
   let singerTrackCounter = 0;
   for (const m of doc.marchers) {
@@ -123,20 +87,8 @@ export function buildStandardMidiFile(doc: BeatDocument, bars = 8): Uint8Array {
     const spec = SCALE_INTERVALS[doc.scale] ?? SCALE_INTERVALS['D-lydian'];
 
     for (let bar = 0; bar < bars; bar++) {
-      // Simulate Berry-phase holonomy progression bar-by-bar across the 8-bar phrase
-      const thetaRad = holonomyActive ? bar * (holonomy?.curvature ?? 0) * (Math.PI * 0.42) : 0;
-      const stepRotate =
-        holonomyActive && holonomy?.rhythmRotatePerOrbit
-          ? Math.round((thetaRad / (Math.PI * 2)) * 16)
-          : 0;
-      const degreeShift =
-        holonomyActive && holonomy?.harmonyTransposePerOrbit
-          ? Math.round(Math.sin(thetaRad) * 2)
-          : 0;
-
       for (let s = 0; s < 16; s++) {
-        const readIdx = (((s - stepRotate) % 16) + 16) % 16;
-        const velRaw = m.steps[readIdx] ?? 0;
+        const velRaw = m.steps[s] ?? 0;
         if (velRaw <= 0.01) continue;
 
         const vel = Math.max(12, Math.min(127, Math.round(velRaw * m.gain * 112)));
@@ -151,14 +103,13 @@ export function buildStandardMidiFile(doc: BeatDocument, bars = 8): Uint8Array {
 
         let note: number;
         if (isSinger) {
-          const explicit = m.notes?.[readIdx];
-          const baseNote =
+          const explicit = m.notes?.[s];
+          note =
             typeof explicit === 'number'
               ? explicit
               : spec.rootMidi +
                 (m.role === 'bass' ? -12 : m.role === 'melody' ? 12 : 0) +
-                spec.intervals[readIdx % spec.intervals.length];
-          note = transposeMidiInScale(baseNote, degreeShift, doc.scale);
+                spec.intervals[s % spec.intervals.length];
         } else {
           note = DRUM_NOTE_MAP[m.role] ?? 36;
         }

@@ -16,19 +16,16 @@ import {
   StudioVideoRecorder,
   downloadMidiFromBeat,
 } from '../audio/studioExport';
-import { BeatDropTiming, WebMcpStatus, registerClearCubeWebMcp } from '../mcp/webmcp';
 import { ConnectionStatus, RoomClient } from '../net/roomClient';
 import {
   BeatDocument,
   BeatMarcherSpec,
   DEFAULT_BEAT_DOCUMENT,
-  DEFAULT_HOLONOMY,
   DREI_STAR_HUES,
-  HolonomyConfig,
   INSTRUMENT_ROLE_LABELS,
   InstrumentRole,
   MusicalScaleId,
-  bpmToAnimFps,
+  SCALE_INTERVALS,
   buildBrainFromBeatMarcher,
   buildCharactersFromBeatDocument,
   exportBeatDocumentFromCharacters,
@@ -47,6 +44,8 @@ import {
   ServerToClientMessage,
   createSpawnCharacter,
   decodeKolmogorov,
+  encodeKolmogorov,
+  sanitizeFriendlyLabel,
 } from '../shared/protocol';
 import {
   EncodedCartridge,
@@ -57,11 +56,6 @@ import { MusicalCampfire } from './campfire';
 import { CharacterRig } from './characterRig';
 import { WorldHandles, buildCubeWorld } from './cubeWorld';
 import { DreiStars } from './dreiStars';
-import {
-  HolonomyField,
-  evaluateLocalCurvature,
-  sampleGeodesicRadius,
-} from './holonomyField';
 
 export interface MarcherSummary {
   id: string;
@@ -69,13 +63,15 @@ export interface MarcherSummary {
   role: InstrumentRole;
   variant: string;
   muted: boolean;
+  gain: number;
   accentHue: number;
+  steps: number[];
+  notes?: Array<number | null>;
 }
 
-export interface PendingDropSummary {
-  title: string;
-  timing: BeatDropTiming;
-  barsRemaining: number;
+export interface RecordStepTarget {
+  id: string;
+  stepIdx: number;
 }
 
 export interface HudSnapshot {
@@ -89,18 +85,14 @@ export interface HudSnapshot {
   marchers: MarcherSummary[];
   beatTitle: string;
   beatScale: MusicalScaleId;
-  holonomy: HolonomyConfig;
-  holonomyThetaDeg: number;
-  pendingDrop: PendingDropSummary | null;
   audioBands: AudioBands;
   musicalClock: MusicalClock;
   midiLayout: Midi47LayoutId;
   activeKeyCodes: string[];
   lastMidiNote: string | null;
-  recordStepIndex: number | null;
+  recordTarget: RecordStepTarget | null;
   midiHub: MidiHubSnapshot;
   recorder: StudioRecorderState;
-  webMcp: WebMcpStatus;
 }
 
 interface SparkParticle {
@@ -144,7 +136,6 @@ export class PlaygroundScene {
   private world: WorldHandles;
   private campfire: MusicalCampfire;
   private dreiStars: DreiStars;
-  private holonomyField: HolonomyField;
 
   private clientId: string;
   private roomClient: RoomClient;
@@ -160,21 +151,8 @@ export class PlaygroundScene {
   private beatTitle = DEFAULT_BEAT_DOCUMENT.title;
   private hasLoadedUrlCartridge = false;
 
-  // Holonomy parallel-transport state
-  private holonomy: HolonomyConfig = { ...DEFAULT_HOLONOMY, wells: [] };
-  private globalHolonomyTheta = 0;
-  private marcherHolonomyPhases = new Map<string, number>();
-
-  // Bar-8 FOOOF! / Next-Bar Quantized Beat Drop Queue
-  private pendingDrop: { doc: BeatDocument; timing: BeatDropTiming } | null = null;
-  private lastTotalBar = -1;
-
-  // Optional step-recording pointer when clicking a singer step and playing a 47-key note
-  private recordStepIndex: number | null = null;
-
-  // WebMCP integration status & cleanup
-  private webMcpStatus: WebMcpStatus = { nativeAvailable: false, toolNames: [], lastCall: null };
-  private disposeWebMcp: () => void = () => {};
+  // Optional step-recording cursor when Shift-clicking / double-clicking a singer cell
+  private recordTarget: RecordStepTarget | null = null;
 
   // 47-Key ANSI QWERTY + Two-Way WebMIDI Hub + Studio Recorder
   private midiLayout: Midi47LayoutId = 'vmpk';
@@ -258,10 +236,6 @@ export class PlaygroundScene {
     this.dreiStars = new DreiStars();
     this.scene.add(this.dreiStars.root);
 
-    // 3D Holonomy Manifold overlay (warped geodesic rings, Berry-phase arc & curvature well spires)
-    this.holonomyField = new HolonomyField();
-    this.scene.add(this.holonomyField.root);
-
     // Two-way WebMIDI Hub (MIDI In notes + CC knobs; MIDI Out 4 drums Ch10 + 3 singers Ch1..3)
     this.midiHub = new WebMidiHub();
     this.midiHubSnapshot = this.midiHub.getSnapshot();
@@ -309,7 +283,7 @@ export class PlaygroundScene {
     this.roomClient.connect();
     this.bindEvents();
 
-    // Auto-boot Demoscene URL Cartridge if `#beat=...` is present in location.hash
+    // Auto-boot URL hash song if `#beat=...` is present in location.hash
     if (window.location.hash.startsWith('#beat=')) {
       void decodeBeatFromUrlHash(window.location.hash).then((doc) => {
         if (!this.disposed && doc) {
@@ -318,50 +292,6 @@ export class PlaygroundScene {
         }
       });
     }
-
-    // Register W3C WebMCP (`navigator.modelContext`) tools for Beat JSON, Holonomy & Bar-8 Drop Jamming
-    const mcp = registerClearCubeWebMcp({
-      getBeatDocument: () => this.getBeatDocument(),
-      getLiveTelemetry: () => {
-        const clock = soundEngine.getMusicalClock(performance.now());
-        const wrappedDeg = Math.round(
-          ((((this.globalHolonomyTheta * 180) / Math.PI) % 360) + 360) % 360
-        );
-        return {
-          barInPhrase: clock.barInPhrase,
-          beatInBar: clock.beatInBar,
-          barsUntilFooofDrop: Math.max(1, 9 - clock.barInPhrase),
-          holonomyThetaDeg: wrappedDeg,
-          pendingDropTitle: this.pendingDrop?.doc.title ?? null,
-        };
-      },
-      setBpm: (bpm) => {
-        const applied = this.setBpm(bpm);
-        return { bpm: applied, animFps: bpmToAnimFps(applied) };
-      },
-      loadBeatDocument: (doc) => this.loadBeatDocument(doc),
-      queueBeatDrop: (doc, timing) => this.queueBeatDrop(doc, timing),
-      setHolonomy: (patch) => this.setHolonomy(patch),
-      getShareUrl: async () => {
-        const res = await this.createShareCartridgeUrl();
-        return { url: res.url, byteLength: res.byteLength, compressed: res.compressed };
-      },
-      upsertMarcher: (spec) => this.upsertMarcherFromSpec(spec),
-      removeMarcher: (id) => this.removeMarcherById(id),
-      stageMarcher: (id) => {
-        this.stageCharacter(id);
-        return this.stagedId;
-      },
-      playMidiNotes: (notes, velocity = 0.84) => {
-        return notes.map((n) => this.triggerMidiNote(n, velocity).noteName);
-      },
-      onToolInvoked: (toolName) => {
-        this.webMcpStatus = { ...this.webMcpStatus, lastCall: toolName };
-        this.pushHud(true);
-      },
-    });
-    this.webMcpStatus = mcp.status;
-    this.disposeWebMcp = mcp.dispose;
 
     if (!this.isSoftwareGl) {
       this.renderer.compile(this.scene, this.camera);
@@ -388,14 +318,26 @@ export class PlaygroundScene {
   private normalizeIncomingCharacter(ch: CharacterState): CharacterState {
     const role: InstrumentRole = ch.role ?? 'melody';
     const variant = ch.variant && isValidVariantForRole(role, ch.variant) ? ch.variant : getDefaultVariantForRole(role);
+    const rawSeed = ch.brain?.seed ?? '';
+    const isLegacyCode = rawSeed.startsWith('K3:') || /^[A-Z0-9_-]{6,}$/.test(rawSeed);
+    const baseBrain = ch.brain?.shapes?.length === 3 ? ch.brain : decodeKolmogorov(getDefaultSeedForRole(role));
+    const cleanSeed = isLegacyCode
+      ? encodeKolmogorov(baseBrain)
+      : rawSeed.trim().toLowerCase().replace(/holonomy/g, 'moss') || encodeKolmogorov(baseBrain);
+
     return {
       ...ch,
+      label: sanitizeFriendlyLabel(ch.label, INSTRUMENT_ROLE_LABELS[role]),
       role,
       variant,
       steps: normalizeSteps16(ch.steps, getDefaultStepsForRole(role)),
       notes: isSingerRole(role) ? normalizeNotes16(ch.notes, role) : undefined,
       gain: typeof ch.gain === 'number' ? ch.gain : 0.82,
       muted: Boolean(ch.muted),
+      brain: {
+        ...baseBrain,
+        seed: cleanSeed,
+      },
       mode: 'abandoned',
     };
   }
@@ -478,8 +420,8 @@ export class PlaygroundScene {
     }
 
     if (code === 'Escape') {
-      if (this.recordStepIndex !== null) {
-        this.recordStepIndex = null;
+      if (this.recordTarget !== null) {
+        this.recordTarget = null;
         this.pushHud(true);
         return;
       }
@@ -594,9 +536,11 @@ export class PlaygroundScene {
 
   private removeCharacterLocal(id: string): void {
     this.characters.delete(id);
+    if (this.recordTarget?.id === id) {
+      this.recordTarget = null;
+    }
     if (this.stagedId === id) {
       this.stagedId = null;
-      this.recordStepIndex = null;
       this.targetCamDistance = 17.8;
       this.targetCamPitch = 0.42;
     }
@@ -732,7 +676,7 @@ export class PlaygroundScene {
     }
   }
 
-  // ==================== PUBLIC BEAT, BPM, INSTRUMENT & WEBMCP ACTIONS ====================
+  // ==================== PUBLIC BEAT, BPM & INSTRUMENT ACTIONS ====================
 
   public setBpm(bpm: number): number {
     const applied = soundEngine.setBpm(bpm);
@@ -751,8 +695,7 @@ export class PlaygroundScene {
       this.characters.values(),
       soundEngine.getBpm(),
       soundEngine.getScale(),
-      this.beatTitle,
-      this.holonomy
+      this.beatTitle
     );
   }
 
@@ -760,13 +703,6 @@ export class PlaygroundScene {
     soundEngine.setBpm(doc.bpm);
     soundEngine.setScale(doc.scale);
     this.beatTitle = doc.title;
-
-    if (doc.holonomy) {
-      this.setHolonomy(doc.holonomy);
-    } else {
-      this.setHolonomy({ ...DEFAULT_HOLONOMY, wells: [] });
-    }
-    this.resetHolonomyPhase();
 
     const nextChars = buildCharactersFromBeatDocument(doc, 0);
     this.replaceAllCharactersLocal(nextChars);
@@ -777,105 +713,6 @@ export class PlaygroundScene {
     this.dreiStars.pulseStar('harmony', 1.35);
     this.pushHud(true);
     return this.getBeatDocument();
-  }
-
-  public queueBeatDrop(
-    doc: BeatDocument,
-    timing: BeatDropTiming = 'bar-8-fooof'
-  ): { queued: boolean; timing: BeatDropTiming; title: string } {
-    if (timing === 'now') {
-      this.pendingDrop = null;
-      this.loadBeatDocument(doc);
-      return { queued: false, timing: 'now', title: doc.title };
-    }
-    this.pendingDrop = { doc, timing };
-    this.dreiStars.pulseStar('bass', 0.9);
-    this.dreiStars.pulseStar('melody', 0.9);
-    this.dreiStars.pulseStar('harmony', 0.9);
-    this.pushHud(true);
-    return { queued: true, timing, title: doc.title };
-  }
-
-  public flushPendingDropNow(): void {
-    if (!this.pendingDrop) return;
-    const next = this.pendingDrop.doc;
-    this.pendingDrop = null;
-    this.loadBeatDocument(next);
-  }
-
-  public cancelPendingDrop(): void {
-    if (!this.pendingDrop) return;
-    this.pendingDrop = null;
-    this.pushHud(true);
-  }
-
-  // ==================== HOLONOMY MANIFOLD & CURVATURE CONTROLS ====================
-
-  public setHolonomy(patch: Partial<HolonomyConfig>): HolonomyConfig {
-    const nextCurvature =
-      patch.curvature !== undefined && Number.isFinite(patch.curvature)
-        ? Number(Math.max(-1, Math.min(1, patch.curvature)).toFixed(2))
-        : this.holonomy.curvature;
-    const nextMorph =
-      patch.timbreMorph !== undefined && Number.isFinite(patch.timbreMorph)
-        ? Number(Math.max(0, Math.min(1, patch.timbreMorph)).toFixed(2))
-        : this.holonomy.timbreMorph;
-
-    this.holonomy = {
-      enabled: patch.enabled !== undefined ? Boolean(patch.enabled) : this.holonomy.enabled,
-      curvature: nextCurvature,
-      rhythmRotatePerOrbit:
-        patch.rhythmRotatePerOrbit !== undefined
-          ? Boolean(patch.rhythmRotatePerOrbit)
-          : this.holonomy.rhythmRotatePerOrbit,
-      harmonyTransposePerOrbit:
-        patch.harmonyTransposePerOrbit !== undefined
-          ? Boolean(patch.harmonyTransposePerOrbit)
-          : this.holonomy.harmonyTransposePerOrbit,
-      timbreMorph: nextMorph,
-      wells:
-        patch.wells !== undefined
-          ? patch.wells.slice(0, 4).map((w, idx) => ({
-              id: w.id || `well-${idx + 1}`,
-              angle: Number(((((w.angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2))).toFixed(3)),
-              radius: Number(Math.max(5.5, Math.min(10.8, w.radius)).toFixed(2)),
-              strength: Number(Math.max(-1, Math.min(1, w.strength)).toFixed(2)),
-            }))
-          : this.holonomy.wells,
-    };
-
-    soundEngine.setHolonomyConfig(this.holonomy);
-    this.holonomyField.setConfig(this.holonomy);
-    this.pushHud(true);
-    return { ...this.holonomy, wells: this.holonomy.wells.map((w) => ({ ...w })) };
-  }
-
-  public addCurvatureWell(strength = 0.72): void {
-    if (this.holonomy.wells.length >= 4) return;
-    const idx = this.holonomy.wells.length;
-    const angle = Number((((idx * Math.PI * 0.5 + 0.55) % (Math.PI * 2))).toFixed(3));
-    const radius = idx % 2 === 0 ? 7.55 : 9.1;
-    const nextWells = [
-      ...this.holonomy.wells,
-      {
-        id: `well-${Date.now().toString(36).slice(-3)}`,
-        angle,
-        radius,
-        strength,
-      },
-    ];
-    this.setHolonomy({ enabled: true, wells: nextWells });
-  }
-
-  public removeCurvatureWell(id: string): void {
-    this.setHolonomy({ wells: this.holonomy.wells.filter((w) => w.id !== id) });
-  }
-
-  public resetHolonomyPhase(): void {
-    this.globalHolonomyTheta = 0;
-    this.marcherHolonomyPhases.clear();
-    soundEngine.clearHolonomyPhases();
-    this.pushHud(true);
   }
 
   // ==================== SHAREABLE URL CARTRIDGE, WEBMIDI & STUDIO CAPTURE ====================
@@ -902,9 +739,6 @@ export class PlaygroundScene {
       // Envelope Release
       soundEngine.setZynParams({ release: Number((0.14 + norm * 1.86).toFixed(2)) });
     } else if (cc === 1) {
-      // Mod Wheel -> Live Holonomy Curvature K (-1..1) & staged crystal complexity
-      const curvature = Number(((norm * 2 - 1) * 0.95).toFixed(2));
-      this.setHolonomy({ enabled: true, curvature });
       const staged = this.getStaged();
       if (staged) {
         this.updateStagedBrain({ ...staged.brain, complexity: Number(norm.toFixed(2)) }, false);
@@ -963,7 +797,7 @@ export class PlaygroundScene {
   public spawnMarcher(role: InstrumentRole = 'melody', variant?: string): CharacterState {
     const resolvedVariant =
       variant && isValidVariantForRole(role, variant) ? variant : getDefaultVariantForRole(role);
-    const seed = `${getDefaultSeedForRole(role)}-${(this.spawnCounter + 1).toString(36).toUpperCase()}`;
+    const seed = getDefaultSeedForRole(role);
     const steps = getDefaultStepsForRole(role);
     const notes = getDefaultNotesForRole(role);
     const brain = buildBrainFromBeatMarcher({
@@ -977,7 +811,9 @@ export class PlaygroundScene {
       notes,
       seed,
     });
-    const shortName = INSTRUMENT_ROLE_LABELS[role].split(' ')[0];
+    const baseName = INSTRUMENT_ROLE_LABELS[role];
+    const sameRoleCount = Array.from(this.characters.values()).filter((c) => c.role === role).length;
+    const label = sameRoleCount === 0 ? baseName : `${baseName} ${sameRoleCount + 1}`;
     const ch = createSpawnCharacter(this.clientId, brain, {
       role,
       variant: resolvedVariant,
@@ -985,7 +821,7 @@ export class PlaygroundScene {
       notes,
       gain: 0.84,
       muted: false,
-      label: `${shortName}-${String(this.characters.size + 1).padStart(2, '0')}`,
+      label,
     });
 
     this.characters.set(ch.id, ch);
@@ -995,7 +831,8 @@ export class PlaygroundScene {
 
     this.roomClient.send({ type: 'spawn', character: ch });
     void soundEngine.playBootupChime(this.spawnCounter);
-    this.stageCharacter(ch.id);
+    this.spawnSparkBurst(ch.x, ch.y + 2.2, ch.z, ch.brain.accentHue, 10);
+    this.pushHud(true);
     return ch;
   }
 
@@ -1018,11 +855,11 @@ export class PlaygroundScene {
       : undefined;
     const gain = typeof spec.gain === 'number' ? Math.max(0.1, Math.min(1.2, spec.gain)) : existing?.gain ?? 0.84;
     const muted = spec.muted !== undefined ? Boolean(spec.muted) : existing?.muted ?? false;
-    const seed = spec.seed && spec.seed.trim() ? spec.seed.trim() : existing?.brain.seed ?? getDefaultSeedForRole(role);
-    const label =
-      spec.label && spec.label.trim()
-        ? spec.label.trim().slice(0, 24)
-        : existing?.label ?? `${INSTRUMENT_ROLE_LABELS[role].split(' ')[0]}-${String(this.characters.size + 1).padStart(2, '0')}`;
+    const seed =
+      spec.seed && spec.seed.trim()
+        ? spec.seed.trim().toLowerCase()
+        : existing?.brain.seed ?? getDefaultSeedForRole(role);
+    const label = sanitizeFriendlyLabel(spec.label, existing?.label ?? INSTRUMENT_ROLE_LABELS[role]);
 
     const fullSpec: BeatMarcherSpec = {
       id: existing?.id ?? spec.id ?? `marcher-${role}-${Date.now().toString(36).slice(-4)}`,
@@ -1086,8 +923,8 @@ export class PlaygroundScene {
     return true;
   }
 
-  public setRecordStepIndex(idx: number | null): void {
-    this.recordStepIndex = idx;
+  public setRecordTarget(target: RecordStepTarget | null): void {
+    this.recordTarget = target;
     this.pushHud(true);
   }
 
@@ -1142,16 +979,89 @@ export class PlaygroundScene {
     this.pushHud(true);
   }
 
-  public toggleStagedStep(stepIdx: number): void {
-    const target = this.getStaged() ?? (this.characters.values().next().value as CharacterState | undefined);
+  public setMarcherStep(id: string, stepIdx: number, forceActive?: boolean): void {
+    const target = this.characters.get(id);
     if (!target || stepIdx < 0 || stepIdx >= 16) return;
-    const nextSteps = [...target.steps];
-    nextSteps[stepIdx] = nextSteps[stepIdx] > 0.05 ? 0 : stepIdx % 4 === 0 ? 0.95 : 0.78;
-    const nextNotes = isSingerRole(target.role) ? [...(target.notes ?? getDefaultNotesForRole(target.role)!)] : undefined;
-    if (nextNotes && nextSteps[stepIdx] > 0 && nextNotes[stepIdx] === null) {
-      nextNotes[stepIdx] = target.role === 'bass' ? 38 : target.role === 'melody' ? 66 : 57;
+    if (!soundEngine.isInitialized()) {
+      void soundEngine.ensureReady();
     }
+
+    const nextSteps = [...target.steps];
+    const currentlyOn = nextSteps[stepIdx] > 0.05;
+    const nextOn = forceActive !== undefined ? forceActive : !currentlyOn;
+    if (nextOn === currentlyOn) return;
+
+    nextSteps[stepIdx] = nextOn ? (stepIdx % 4 === 0 ? 0.95 : 0.78) : 0;
+
+    let nextNotes: Array<number | null> | undefined = isSingerRole(target.role)
+      ? [...(target.notes ?? getDefaultNotesForRole(target.role)!)]
+      : undefined;
+
+    if (nextNotes && nextOn && nextNotes[stepIdx] === null) {
+      const spec = SCALE_INTERVALS[soundEngine.getScale()] ?? SCALE_INTERVALS['D-lydian'];
+      const octOffset = target.role === 'bass' ? -12 : target.role === 'melody' ? 12 : 0;
+      nextNotes[stepIdx] = spec.rootMidi + octOffset + spec.intervals[stepIdx % spec.intervals.length];
+    }
+
+    const hue = isSingerRole(target.role) ? DREI_STAR_HUES[target.role] : target.brain.accentHue;
+    this.rigs.get(target.id)?.triggerVfxPulse(hue, nextOn ? 0.65 : 0.25);
     this.updateMarcherInstrument(target.id, { steps: nextSteps, notes: nextNotes });
+  }
+
+  public nudgeMarcherStepNote(id: string, stepIdx: number, deltaDegree: number): void {
+    const target = this.characters.get(id);
+    if (!target || !isSingerRole(target.role) || stepIdx < 0 || stepIdx >= 16) return;
+    if (!soundEngine.isInitialized()) {
+      void soundEngine.ensureReady();
+    }
+
+    const spec = SCALE_INTERVALS[soundEngine.getScale()] ?? SCALE_INTERVALS['D-lydian'];
+    const intervals = spec.intervals;
+    const octOffset = target.role === 'bass' ? -12 : target.role === 'melody' ? 12 : 0;
+    const fallbackMidi = spec.rootMidi + octOffset + intervals[stepIdx % intervals.length];
+
+    const nextSteps = [...target.steps];
+    if (nextSteps[stepIdx] <= 0.05) {
+      nextSteps[stepIdx] = stepIdx % 4 === 0 ? 0.95 : 0.78;
+    }
+
+    const nextNotes = [...(target.notes ?? getDefaultNotesForRole(target.role)!)];
+    const curMidi = typeof nextNotes[stepIdx] === 'number' ? nextNotes[stepIdx]! : fallbackMidi;
+
+    const rootPc = spec.rootMidi % 12;
+    const rel = curMidi - rootPc;
+    const oct = Math.floor(rel / 12);
+    const pc = ((rel % 12) + 12) % 12;
+
+    let bestIdx = 0;
+    let bestDist = 99;
+    for (let i = 0; i < intervals.length; i++) {
+      const d = Math.abs(intervals[i] - pc);
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+
+    const totalDeg = bestIdx + deltaDegree;
+    const octDelta = Math.floor(totalDeg / intervals.length);
+    const nextIdx = ((totalDeg % intervals.length) + intervals.length) % intervals.length;
+    const nextMidi = Math.max(24, Math.min(96, rootPc + (oct + octDelta) * 12 + intervals[nextIdx]));
+
+    nextNotes[stepIdx] = nextMidi;
+    soundEngine.playZynNote(nextMidi, 0.52, true);
+    this.rigs.get(target.id)?.triggerVfxPulse(DREI_STAR_HUES[target.role], 0.75);
+    this.updateMarcherInstrument(target.id, { steps: nextSteps, notes: nextNotes });
+  }
+
+  public clearAllSteps(): void {
+    const empty = new Array<number>(16).fill(0);
+    for (const ch of this.characters.values()) {
+      ch.steps = [...empty];
+      this.broadcastCharacterUpdate(ch, false, false);
+    }
+    this.syncEnsembleToAudio();
+    this.pushHud(true);
   }
 
   public setMidiLayout(layout: Midi47LayoutId): void {
@@ -1176,7 +1086,6 @@ export class PlaygroundScene {
     }
 
     this.stagedId = resolvedId;
-    this.recordStepIndex = null;
 
     if (resolvedId) {
       const stageRadius = 2.45;
@@ -1229,18 +1138,22 @@ export class PlaygroundScene {
     const res = soundEngine.playZynNote(midi, velocity, true);
     this.lastMidiNote = res.noteName;
 
+    // If a singer cell is armed for step-note entry, write this played MIDI note straight into that row!
+    if (this.recordTarget !== null) {
+      const recChar = this.characters.get(this.recordTarget.id);
+      if (recChar && isSingerRole(recChar.role)) {
+        const sIdx = this.recordTarget.stepIdx;
+        const nextSteps = [...recChar.steps];
+        const nextNotes = [...(recChar.notes ?? getDefaultNotesForRole(recChar.role)!)];
+        nextSteps[sIdx] = Number(Math.max(0.65, Math.min(1, velocity)).toFixed(2));
+        nextNotes[sIdx] = res.midi;
+        this.recordTarget = { id: recChar.id, stepIdx: (sIdx + 1) % 16 };
+        this.updateMarcherInstrument(recChar.id, { steps: nextSteps, notes: nextNotes });
+      }
+    }
+
     const staged = this.getStaged();
     if (staged) {
-      // If step-pitch recording is armed on a singer, write this played MIDI note straight into that step!
-      if (this.recordStepIndex !== null && isSingerRole(staged.role)) {
-        const sIdx = this.recordStepIndex;
-        const nextSteps = [...staged.steps];
-        const nextNotes = [...(staged.notes ?? getDefaultNotesForRole(staged.role)!)];
-        nextSteps[sIdx] = Number(Math.max(0.55, Math.min(1, velocity)).toFixed(2));
-        nextNotes[sIdx] = res.midi;
-        this.recordStepIndex = (sIdx + 1) % 16;
-        this.updateMarcherInstrument(staged.id, { steps: nextSteps, notes: nextNotes });
-      }
 
       if (isSingerRole(staged.role)) {
         this.dreiStars.pulseStar(staged.role, 1.15);
@@ -1460,28 +1373,8 @@ export class PlaygroundScene {
     const dAngle = ch.orbitSpeed * ch.orbitDir * musicBoost * dt;
     ch.orbitAngle += dAngle;
 
-    // Accumulate parallel-transport Berry phase θ along the curved campfire manifold
-    if (this.holonomy.enabled && (Math.abs(this.holonomy.curvature) > 0.01 || this.holonomy.wells.length > 0)) {
-      const localK = evaluateLocalCurvature(ch.orbitAngle, ch.orbitRadius, this.holonomy);
-      const nextTheta = (this.marcherHolonomyPhases.get(ch.id) ?? 0) + Math.abs(dAngle) * localK * 0.62;
-      this.marcherHolonomyPhases.set(ch.id, nextTheta);
-      soundEngine.setMarcherHolonomyPhase(ch.id, nextTheta);
-
-      // Pulse any curvature well spire when a marcher glides past it
-      for (let wIdx = 0; wIdx < this.holonomy.wells.length; wIdx++) {
-        const well = this.holonomy.wells[wIdx];
-        let dAng = ch.orbitAngle - well.angle;
-        while (dAng > Math.PI) dAng -= Math.PI * 2;
-        while (dAng < -Math.PI) dAng += Math.PI * 2;
-        if (Math.abs(dAng) < 0.16 && Math.abs(ch.orbitRadius - well.radius) < 2.2) {
-          this.holonomyField.pulseWell(wIdx, 1.0);
-        }
-      }
-    }
-
-    const geodesicRadius = sampleGeodesicRadius(ch.orbitRadius, ch.orbitAngle, this.holonomy);
-    const targetX = Math.cos(ch.orbitAngle) * geodesicRadius;
-    const targetZ = Math.sin(ch.orbitAngle) * geodesicRadius;
+    const targetX = Math.cos(ch.orbitAngle) * ch.orbitRadius;
+    const targetZ = Math.sin(ch.orbitAngle) * ch.orbitRadius;
 
     ch.x = THREE.MathUtils.damp(ch.x, targetX, 3.2, dt);
     ch.z = THREE.MathUtils.damp(ch.z, targetZ, 3.2, dt);
@@ -1554,7 +1447,7 @@ export class PlaygroundScene {
     const staged = this.getStaged();
     const first = this.characters.values().next().value as CharacterState | undefined;
     const activeChar = staged ?? first ?? null;
-    const displayBrain = activeChar?.brain ?? decodeKolmogorov('CRYSTAL-FAE-HEARTH');
+    const displayBrain = activeChar?.brain ?? decodeKolmogorov('sunny-moss');
 
     const marchers: MarcherSummary[] = Array.from(this.characters.values()).map((c) => ({
       id: c.id,
@@ -1562,21 +1455,13 @@ export class PlaygroundScene {
       role: c.role,
       variant: c.variant,
       muted: c.muted,
+      gain: c.gain,
       accentHue: isSingerRole(c.role) ? DREI_STAR_HUES[c.role] : c.brain.accentHue,
+      steps: [...c.steps],
+      notes: c.notes ? [...c.notes] : undefined,
     }));
 
     const clock = soundEngine.getMusicalClock(now);
-    const wrappedDeg = Math.round(
-      ((((this.globalHolonomyTheta * 180) / Math.PI) % 360) + 360) % 360
-    );
-    const pendingDropSummary: PendingDropSummary | null = this.pendingDrop
-      ? {
-          title: this.pendingDrop.doc.title,
-          timing: this.pendingDrop.timing,
-          barsRemaining:
-            this.pendingDrop.timing === 'next-bar' ? 1 : Math.max(1, 9 - clock.barInPhrase),
-        }
-      : null;
 
     this.onHudUpdate({
       connectionStatus: this.connectionStatus,
@@ -1595,18 +1480,14 @@ export class PlaygroundScene {
       marchers,
       beatTitle: this.beatTitle,
       beatScale: soundEngine.getScale(),
-      holonomy: { ...this.holonomy, wells: this.holonomy.wells.map((w) => ({ ...w })) },
-      holonomyThetaDeg: wrappedDeg,
-      pendingDrop: pendingDropSummary,
       audioBands: soundEngine.getAudioBands(elapsedSec),
       musicalClock: clock,
       midiLayout: this.midiLayout,
       activeKeyCodes: Array.from(this.pressedCodes),
       lastMidiNote: this.lastMidiNote,
-      recordStepIndex: this.recordStepIndex,
+      recordTarget: this.recordTarget,
       midiHub: this.midiHubSnapshot,
       recorder: this.studioRecorder.getState(),
-      webMcp: this.webMcpStatus,
     });
   }
 
@@ -1653,55 +1534,20 @@ export class PlaygroundScene {
       // Update central musical campfire in exact sync with the 8-beat bump/BUMP/FOOOF! rhythm
       this.campfire.update(elapsedSec, dt, audio, clock);
 
-      // Compute Bar-8 / Next-Bar incoming drop urgency so Drei Stars glow golden before the drop!
-      let dropUrgency = 0;
-      if (this.pendingDrop) {
-        if (this.pendingDrop.timing === 'next-bar') {
-          dropUrgency = 0.55 + ((clock.exactBeats % 4) / 4) * 0.45;
-        } else {
-          dropUrgency = Math.min(1, (clock.barInPhrase - 1) / 7 + (clock.isBreakBar ? clock.breakProgress * 0.35 : 0));
-        }
-      }
-
       // Update Drei Stars tri-star harmonic constellation hovering above the hearth
-      this.dreiStars.update(elapsedSec, dt, audio, clock, dropUrgency);
-
-      // Advance global Berry-phase readout & update 3D Holonomy Manifold floor rings/wells
-      if (this.holonomy.enabled && (Math.abs(this.holonomy.curvature) > 0.01 || this.holonomy.wells.length > 0)) {
-        const wellSum = this.holonomy.wells.reduce((acc, w) => acc + w.strength, 0);
-        const effK = this.holonomy.curvature + wellSum * 0.25;
-        this.globalHolonomyTheta += dt * (clock.bpm / 102) * 0.44 * effK;
-      }
-      this.holonomyField.update(elapsedSec, dt, this.globalHolonomyTheta, audio, clock);
+      this.dreiStars.update(elapsedSec, dt, audio, clock);
 
       // Update ambient Fae Forest fireflies & breathing quartz crystals
       this.world.updateAmbient(dt, elapsedSec, audio.beatPulse);
 
-      // 8-Bar Dance Break entry & Bar-1 Reversal + Quantized Bar-8 FOOOF! / Next-Bar Drop Execution
+      // 8-Bar Dance Break entry & Bar-1 Reversal
       if (clock.isBreakBar && !this.wasBreakBar) {
         soundEngine.playBreakSwell();
       }
       this.wasBreakBar = clock.isBreakBar;
 
-      const currentTotalBar = Math.floor(clock.totalBeats / 4);
-      if (currentTotalBar !== this.lastTotalBar) {
-        this.lastTotalBar = currentTotalBar;
-        if (this.pendingDrop?.timing === 'next-bar') {
-          const nextDoc = this.pendingDrop.doc;
-          this.pendingDrop = null;
-          this.loadBeatDocument(nextDoc);
-          this.spawnSparkBurst(0, 6.8, 0, 42, 18);
-        }
-      }
-
       if (clock.phraseIndex !== this.lastPhraseIndex) {
         this.lastPhraseIndex = clock.phraseIndex;
-        if (this.pendingDrop?.timing === 'bar-8-fooof') {
-          const nextDoc = this.pendingDrop.doc;
-          this.pendingDrop = null;
-          this.loadBeatDocument(nextDoc);
-          this.spawnSparkBurst(0, 6.8, 0, 42, 22);
-        }
         for (const ch of this.characters.values()) {
           if (ch.id !== this.stagedId) {
             ch.orbitDir = ch.orbitDir === 1 ? -1 : 1;
@@ -1733,9 +1579,6 @@ export class PlaygroundScene {
           this.stepRingDancer(ch, dt, audio, clock);
         }
         const rig = this.ensureRig(ch);
-        const theta = this.holonomy.enabled
-          ? (this.marcherHolonomyPhases.get(ch.id) ?? this.globalHolonomyTheta)
-          : 0;
         rig.update(
           ch,
           isCenterStage,
@@ -1744,8 +1587,7 @@ export class PlaygroundScene {
           nowMs,
           audio,
           clock,
-          dt,
-          theta
+          dt
         );
       }
 
@@ -1775,7 +1617,6 @@ export class PlaygroundScene {
     this.unbindEvents();
     this.midiHub.dispose();
     this.studioRecorder.dispose();
-    this.disposeWebMcp();
     soundEngine.setCharacterSingCallback(null);
     soundEngine.setEnsembleMidiEventCallback(null);
     this.roomClient.close();
@@ -1798,9 +1639,6 @@ export class PlaygroundScene {
 
     this.scene.remove(this.dreiStars.root);
     this.dreiStars.dispose();
-
-    this.scene.remove(this.holonomyField.root);
-    this.holonomyField.dispose();
 
     for (const d of this.world.disposables) {
       d.dispose();

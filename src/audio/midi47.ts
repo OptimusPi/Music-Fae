@@ -3,9 +3,9 @@ import { midiToHue, midiToNoteName } from './soundEngine';
 export type Midi47LayoutId = 'vmpk' | 'isomorphic' | 'chromatic';
 
 export const MIDI47_LAYOUT_LABELS: Record<Midi47LayoutId, string> = {
-  vmpk: 'VMPK Dual-Row',
-  isomorphic: 'Isomorphic (Wicki-Hayden)',
-  chromatic: '47-Key Chromatic',
+  vmpk: 'Piano Rows',
+  isomorphic: 'Harmonic Grid',
+  chromatic: 'Note Order',
 };
 
 export interface PhysicalKeyDef {

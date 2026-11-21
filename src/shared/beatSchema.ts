@@ -3,6 +3,7 @@ import {
   SnapBand,
   VfxTriggerMode,
   decodeKolmogorov,
+  sanitizeFriendlyLabel,
 } from './protocol';
 
 export type DrumRole = 'kick' | 'snare' | 'hat' | 'perc';
@@ -16,11 +17,11 @@ export const INSTRUMENT_ROLES: InstrumentRole[] = [...DRUM_ROLES, ...SINGER_ROLE
 export const INSTRUMENT_ROLE_LABELS: Record<InstrumentRole, string> = {
   kick: 'Kick',
   snare: 'Snare',
-  hat: 'Hi-Hat',
-  perc: 'Perc',
-  bass: 'Bass Singer',
-  melody: 'Melody Singer',
-  harmony: 'Harmony Singer',
+  hat: 'Shaker',
+  perc: 'Kalimba',
+  bass: 'Bass',
+  melody: 'Melody',
+  harmony: 'Choir',
 };
 
 export interface VariantOption {
@@ -30,50 +31,50 @@ export interface VariantOption {
 
 export const ROLE_VARIANTS: Record<InstrumentRole, VariantOption[]> = {
   kick: [
-    { id: 'warm-sub', label: 'Warm Sub' },
-    { id: '808-bloom', label: '808 Bloom' },
-    { id: 'hearth-thump', label: 'Hearth Thump' },
+    { id: 'warm-sub', label: 'Warm Kick' },
+    { id: '808-bloom', label: 'Deep Boom' },
+    { id: 'hearth-thump', label: 'Soft Thump' },
   ],
   snare: [
     { id: 'wood-rim', label: 'Wood Rim' },
-    { id: 'brush-snap', label: 'Brush Snap' },
-    { id: 'tape-crack', label: 'Tape Crack' },
+    { id: 'brush-snap', label: 'Soft Brush' },
+    { id: 'tape-crack', label: 'Crisp Snap' },
   ],
   hat: [
-    { id: 'crystal-tick', label: 'Crystal Tick' },
-    { id: 'moss-shaker', label: 'Moss Shaker' },
-    { id: 'open-shimmer', label: 'Open Shimmer' },
+    { id: 'crystal-tick', label: 'Light Tick' },
+    { id: 'moss-shaker', label: 'Leaf Shaker' },
+    { id: 'open-shimmer', label: 'Open Hat' },
   ],
   perc: [
-    { id: 'ember-tom', label: 'Ember Tom' },
-    { id: 'kalimba-wood', label: 'Kalimba Wood' },
-    { id: 'chime-conga', label: 'Chime Conga' },
+    { id: 'kalimba-wood', label: 'Thumb Piano' },
+    { id: 'ember-tom', label: 'Warm Tom' },
+    { id: 'chime-conga', label: 'Wood Conga' },
   ],
   bass: [
-    { id: 'zimmer-cello', label: 'Zimmer Cello' },
-    { id: 'analog-sub', label: 'Analog Sub' },
-    { id: 'moss-drone', label: 'Moss Drone' },
+    { id: 'zimmer-cello', label: 'Warm Cello' },
+    { id: 'analog-sub', label: 'Round Bass' },
+    { id: 'moss-drone', label: 'Deep Hum' },
   ],
   melody: [
-    { id: 'fae-bell', label: 'Fae Bell' },
-    { id: 'glass-flute', label: 'Glass Flute' },
-    { id: 'tycho-rhodes', label: 'Tycho Rhodes' },
+    { id: 'fae-bell', label: 'Music Box' },
+    { id: 'glass-flute', label: 'Soft Flute' },
+    { id: 'tycho-rhodes', label: 'Warm Keys' },
   ],
   harmony: [
-    { id: 'choir-pad', label: 'Choir Pad' },
-    { id: 'quartz-arp', label: 'Quartz Arp' },
-    { id: 'warm-brass', label: 'Warm Brass' },
+    { id: 'choir-pad', label: 'Soft Choir' },
+    { id: 'quartz-arp', label: 'Pluck Pluck' },
+    { id: 'warm-brass', label: 'Warm Horns' },
   ],
 };
 
 export type MusicalScaleId = 'D-lydian' | 'A-minor' | 'F-major' | 'E-dorian' | 'C-pentatonic';
 
 export const MUSICAL_SCALE_LABELS: Record<MusicalScaleId, string> = {
-  'D-lydian': 'D Lydian',
-  'A-minor': 'A Minor',
-  'F-major': 'F Major',
-  'E-dorian': 'E Dorian',
-  'C-pentatonic': 'C Pentatonic',
+  'C-pentatonic': 'Easy 5-Note',
+  'D-lydian': 'Dreamy',
+  'F-major': 'Sunny Major',
+  'A-minor': 'Cozy Minor',
+  'E-dorian': 'Night Walk',
 };
 
 // Semitone offsets from root MIDI pitch
@@ -86,9 +87,9 @@ export const SCALE_INTERVALS: Record<MusicalScaleId, { rootMidi: number; interva
 };
 
 export const DREI_STAR_HUES: Record<SingerRole, number> = {
-  bass: 38,     // Warm celestial gold
-  melody: 176,  // Luminous aquamarine
-  harmony: 278, // Twilight amethyst
+  bass: 38,     // Warm gold
+  melody: 176,  // Bright aqua
+  harmony: 278, // Soft violet
 };
 
 export const MIN_BPM = 60;
@@ -96,9 +97,8 @@ export const MAX_BPM = 180;
 export const DEFAULT_BPM = 102;
 
 /**
- * Exact BPM-coupled walking animation rate:
- * 12 quantized animation frames per quarter beat = 6 frames per half-beat step
- * => 24.0 FPS at 120 BPM, 20.4 FPS at 102 BPM, 18.0 FPS at 90 BPM, 30.0 FPS at 150 BPM.
+ * BPM-coupled walking animation rate:
+ * 12 quantized animation frames per quarter beat (24 FPS at 120 BPM).
  */
 export function bpmToAnimFps(bpm: number): number {
   const clamped = Math.max(MIN_BPM, Math.min(MAX_BPM, bpm));
@@ -136,41 +136,15 @@ export interface BeatMarcherSpec {
   gain: number; // 0.1..1.2
   steps: number[]; // length 16, each 0..1 (0 = rest, >0 = velocity)
   notes?: Array<number | null>; // length 16, optional MIDI pitch (24..108) for singers
-  seed: string; // Kolmogorov visual brain seed
+  seed: string; // Simple lowercase recipe or phrase
   visuals?: BeatMarcherVisuals;
 }
-
-export interface HolonomyCurvatureWell {
-  id: string;
-  angle: number;    // 0..2π radians around the campfire
-  radius: number;   // 5.8..10.5 ring radius
-  strength: number; // -1..1 signed local curvature bump
-}
-
-export interface HolonomyConfig {
-  enabled: boolean;
-  curvature: number; // -1..1 global manifold curvature K (Berry phase Δθ per orbit)
-  rhythmRotatePerOrbit: boolean;
-  harmonyTransposePerOrbit: boolean;
-  timbreMorph: number; // 0..1 sin(θ) filter/warmth modulation
-  wells: HolonomyCurvatureWell[]; // up to 4 localized curvature wells on the mossy floor
-}
-
-export const DEFAULT_HOLONOMY: HolonomyConfig = {
-  enabled: true,
-  curvature: 0,
-  rhythmRotatePerOrbit: true,
-  harmonyTransposePerOrbit: true,
-  timbreMorph: 0.45,
-  wells: [],
-};
 
 export interface BeatDocument {
   version: '1.0';
   title: string;
-  bpm: number; // 60..180 (controls tempo AND 0.2*bpm walking animation FPS)
+  bpm: number; // 60..180
   scale: MusicalScaleId;
-  holonomy?: HolonomyConfig;
   marchers: BeatMarcherSpec[];
 }
 
@@ -196,11 +170,11 @@ export function getDefaultStepsForRole(role: InstrumentRole): number[] {
 export function getDefaultNotesForRole(role: InstrumentRole): Array<number | null> | undefined {
   switch (role) {
     case 'bass':
-      return [38, null, null, 38, null, null, 45, null, 43, null, null, 43, null, null, 45, null]; // D2 - A2 - G2 - A2
+      return [38, null, null, 38, null, null, 45, null, 43, null, null, 43, null, null, 45, null];
     case 'melody':
-      return [62, null, 66, null, null, 69, null, 73, 74, null, null, 73, null, 69, 66, null]; // D4 F#4 A4 C#5 D5
+      return [62, null, 66, null, null, 69, null, 73, 74, null, null, 73, null, 69, 66, null];
     case 'harmony':
-      return [54, null, null, null, null, null, 57, null, 59, null, null, null, null, null, 61, null]; // F#3 A3 B3 C#4
+      return [54, null, null, null, null, null, 57, null, 59, null, null, null, null, null, 61, null];
     default:
       return undefined;
   }
@@ -209,399 +183,290 @@ export function getDefaultNotesForRole(role: InstrumentRole): Array<number | nul
 export function getDefaultSeedForRole(role: InstrumentRole): string {
   switch (role) {
     case 'kick':
-      return 'CRYSTAL-FAE-HEARTH';
+      return 'coral.pyramid-gold.ring-berry.diamond';
     case 'snare':
-      return 'MOSS-PRISM-GLADE';
+      return 'mint.diamond-sky.prism-gold.cone';
     case 'hat':
-      return 'EMBER-HOLONOMY-08';
+      return 'lime.star-aqua.gem-gold.ring';
     case 'perc':
-      return 'AMBER-SPORE-TRIAD';
+      return 'gold.cone-coral.ribbon-mint.gem';
     case 'bass':
-      return 'DREI-STAR-GOLD-BASS';
+      return 'gold.gem-coral.ring-lime.pyramid';
     case 'melody':
-      return 'DREI-STAR-AQUA-MEL';
+      return 'aqua.star-sky.diamond-mint.ribbon';
     case 'harmony':
-      return 'DREI-STAR-VIOLET-HARM';
+      return 'violet.ring-berry.star-sky.gem';
   }
 }
 
 export const DEFAULT_BEAT_DOCUMENT: BeatDocument = {
   version: '1.0',
-  title: 'Drei Stars Hearth',
+  title: 'Campfire Jam',
   bpm: DEFAULT_BPM,
   scale: 'D-lydian',
-  holonomy: { ...DEFAULT_HOLONOMY, wells: [] },
   marchers: [
-    // 4 Drum Marchers (each marcher IS one instrument)
     {
       id: 'marcher-kick',
-      label: 'Kick-01',
+      label: 'Kick',
       role: 'kick',
       variant: 'warm-sub',
       muted: false,
       gain: 0.92,
       steps: [1, 0, 0, 0, 0.82, 0, 0, 0, 1, 0, 0, 0, 0.85, 0, 0.72, 0],
-      seed: 'CRYSTAL-FAE-HEARTH',
+      seed: 'coral.pyramid-gold.ring-berry.diamond',
       visuals: { snapBand: 'bass', snapThreshold: 0.45, vfxTriggerMode: 'on-beat' },
     },
     {
       id: 'marcher-snare',
-      label: 'Snare-02',
+      label: 'Snare',
       role: 'snare',
       variant: 'wood-rim',
       muted: false,
       gain: 0.82,
       steps: [0, 0, 0, 0, 0.92, 0, 0, 0.3, 0, 0, 0, 0, 0.95, 0, 0, 0.35],
-      seed: 'MOSS-PRISM-GLADE',
+      seed: 'mint.diamond-sky.prism-gold.cone',
       visuals: { snapBand: 'mid', snapThreshold: 0.5, vfxTriggerMode: 'on-beat' },
     },
     {
       id: 'marcher-hat',
-      label: 'Hat-03',
+      label: 'Shaker',
       role: 'hat',
       variant: 'crystal-tick',
       muted: false,
       gain: 0.66,
       steps: [0.7, 0.32, 0.86, 0.32, 0.7, 0.32, 0.9, 0.38, 0.7, 0.32, 0.86, 0.32, 0.7, 0.42, 0.94, 0.38],
-      seed: 'EMBER-HOLONOMY-08',
+      seed: 'lime.star-aqua.gem-gold.ring',
       visuals: { snapBand: 'treble', snapThreshold: 0.46, vfxTriggerMode: 'single' },
     },
     {
       id: 'marcher-perc',
-      label: 'Perc-04',
+      label: 'Kalimba',
       role: 'perc',
       variant: 'kalimba-wood',
       muted: false,
       gain: 0.74,
       steps: [0, 0, 0.62, 0, 0, 0.55, 0, 0, 0, 0, 0.68, 0, 0, 0.5, 0.82, 0],
-      seed: 'AMBER-SPORE-TRIAD',
+      seed: 'gold.cone-coral.ribbon-mint.gem',
       visuals: { snapBand: 'mid', snapThreshold: 0.52, vfxTriggerMode: 'on-beat' },
     },
-    // 3 Singer Marchers (linked to the Drei Stars overhead)
     {
       id: 'marcher-bass',
-      label: 'Bass-Star',
+      label: 'Bass',
       role: 'bass',
       variant: 'zimmer-cello',
       muted: false,
       gain: 0.88,
       steps: [0.95, 0, 0, 0.55, 0, 0, 0.78, 0, 0.9, 0, 0, 0.52, 0, 0, 0.84, 0],
       notes: [38, null, null, 38, null, null, 45, null, 43, null, null, 43, null, null, 45, null],
-      seed: 'DREI-STAR-GOLD-BASS',
+      seed: 'gold.gem-coral.ring-lime.pyramid',
       visuals: { snapBand: 'bass', snapThreshold: 0.44, vfxTriggerMode: 'on-beat' },
     },
     {
       id: 'marcher-melody',
-      label: 'Melody-Star',
+      label: 'Melody',
       role: 'melody',
       variant: 'fae-bell',
       muted: false,
       gain: 0.8,
       steps: [0.88, 0, 0.7, 0, 0, 0.82, 0, 0.64, 0.92, 0, 0, 0.72, 0, 0.78, 0.9, 0],
       notes: [62, null, 66, null, null, 69, null, 73, 74, null, null, 73, null, 69, 66, null],
-      seed: 'DREI-STAR-AQUA-MEL',
+      seed: 'aqua.star-sky.diamond-mint.ribbon',
       visuals: { snapBand: 'treble', snapThreshold: 0.48, vfxTriggerMode: 'on-beat' },
     },
     {
       id: 'marcher-harmony',
-      label: 'Harmony-Star',
+      label: 'Choir',
       role: 'harmony',
       variant: 'choir-pad',
       muted: false,
       gain: 0.75,
       steps: [0.85, 0, 0, 0, 0, 0, 0.65, 0, 0.84, 0, 0, 0, 0, 0, 0.74, 0],
       notes: [54, null, null, null, null, null, 57, null, 59, null, null, null, null, null, 61, null],
-      seed: 'DREI-STAR-VIOLET-HARM',
+      seed: 'violet.ring-berry.star-sky.gem',
       visuals: { snapBand: 'mid', snapThreshold: 0.5, vfxTriggerMode: 'on-beat' },
     },
   ],
 };
 
 export const BEAT_PRESETS: Record<string, BeatDocument> = {
-  'drei-stars': DEFAULT_BEAT_DOCUMENT,
-  'midnight-fae': {
+  'campfire-jam': DEFAULT_BEAT_DOCUMENT,
+  'night-stroll': {
     version: '1.0',
-    title: 'Midnight Fae 126',
-    bpm: 126,
+    title: 'Night Stroll',
+    bpm: 120,
     scale: 'E-dorian',
     marchers: [
       {
         id: 'marcher-kick',
-        label: 'Kick-126',
+        label: 'Kick',
         role: 'kick',
         variant: '808-bloom',
         muted: false,
         gain: 0.96,
         steps: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.75, 0],
-        seed: 'MIDNIGHT-PULSE-01',
+        seed: 'coral.diamond-gold.ring-sky.pyramid',
         visuals: { snapBand: 'bass', snapThreshold: 0.42, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-snare',
-        label: 'Snare-126',
+        label: 'Snare',
         role: 'snare',
         variant: 'tape-crack',
         muted: false,
         gain: 0.85,
         steps: [0, 0, 0, 0, 0.95, 0, 0, 0, 0, 0, 0, 0, 0.95, 0, 0, 0.5],
-        seed: 'MIDNIGHT-CRACK-02',
+        seed: 'sky.prism-mint.diamond-berry.cone',
         visuals: { snapBand: 'mid', snapThreshold: 0.48, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-hat',
-        label: 'Hat-126',
+        label: 'Shaker',
         role: 'hat',
         variant: 'open-shimmer',
         muted: false,
         gain: 0.68,
         steps: [0.45, 0.35, 0.95, 0.35, 0.45, 0.35, 0.95, 0.45, 0.45, 0.35, 0.95, 0.35, 0.45, 0.5, 1, 0.4],
-        seed: 'MIDNIGHT-GLINT-03',
+        seed: 'aqua.star-lime.ring-sky.gem',
         visuals: { snapBand: 'treble', snapThreshold: 0.44, vfxTriggerMode: 'single' },
       },
       {
         id: 'marcher-perc',
-        label: 'Perc-126',
+        label: 'Kalimba',
         role: 'perc',
         variant: 'chime-conga',
         muted: false,
         gain: 0.76,
         steps: [0, 0.6, 0, 0.75, 0, 0, 0.65, 0, 0, 0.6, 0, 0.8, 0, 0.55, 0, 0.7],
-        seed: 'MIDNIGHT-TOM-04',
+        seed: 'berry.cone-gold.gem-mint.prism',
         visuals: { snapBand: 'mid', snapThreshold: 0.5, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-bass',
-        label: 'Bass-Star',
+        label: 'Bass',
         role: 'bass',
         variant: 'analog-sub',
         muted: false,
         gain: 0.92,
         steps: [1, 0, 0.65, 0, 0, 0.7, 0.85, 0, 1, 0, 0.65, 0, 0, 0.75, 0.9, 0],
         notes: [40, null, 40, null, null, 43, 45, null, 47, null, 45, null, null, 43, 42, null],
-        seed: 'DREI-STAR-GOLD-126',
+        seed: 'gold.pyramid-coral.gem-mint.ring',
         visuals: { snapBand: 'bass', snapThreshold: 0.42, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-melody',
-        label: 'Melody-Star',
+        label: 'Melody',
         role: 'melody',
         variant: 'tycho-rhodes',
         muted: false,
         gain: 0.82,
         steps: [0.9, 0, 0, 0.76, 0, 0, 0.84, 0, 0.92, 0, 0.72, 0, 0.86, 0, 0.78, 0],
         notes: [64, null, null, 67, null, null, 71, null, 74, null, 71, null, 69, null, 67, null],
-        seed: 'DREI-STAR-AQUA-126',
+        seed: 'aqua.gem-sky.star-violet.ribbon',
         visuals: { snapBand: 'treble', snapThreshold: 0.45, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-harmony',
-        label: 'Harmony-Star',
+        label: 'Choir',
         role: 'harmony',
         variant: 'quartz-arp',
         muted: false,
         gain: 0.78,
         steps: [0.8, 0, 0.6, 0, 0.72, 0, 0.6, 0, 0.82, 0, 0.6, 0, 0.75, 0, 0.85, 0],
         notes: [55, null, 59, null, 62, null, 59, null, 57, null, 61, null, 64, null, 62, null],
-        seed: 'DREI-STAR-VIOLET-126',
+        seed: 'violet.star-berry.ring-aqua.diamond',
         visuals: { snapBand: 'mid', snapThreshold: 0.48, vfxTriggerMode: 'on-beat' },
       },
     ],
   },
-  'moss-halftime': {
+  'rainy-moss': {
     version: '1.0',
-    title: 'Moss Halftime 84',
+    title: 'Rainy Moss',
     bpm: 84,
-    scale: 'A-minor',
+    scale: 'C-pentatonic',
     marchers: [
       {
         id: 'marcher-kick',
-        label: 'Kick-84',
+        label: 'Kick',
         role: 'kick',
         variant: 'hearth-thump',
         muted: false,
         gain: 0.94,
         steps: [1, 0, 0, 0, 0, 0, 0.7, 0, 0, 0, 0.88, 0, 0, 0, 0.65, 0],
-        seed: 'MOSS-HEARTH-84',
+        seed: 'mossy-pebble',
         visuals: { snapBand: 'bass', snapThreshold: 0.46, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-snare',
-        label: 'Snare-84',
+        label: 'Snare',
         role: 'snare',
         variant: 'brush-snap',
         muted: false,
         gain: 0.86,
         steps: [0, 0, 0, 0, 0, 0, 0, 0, 0.96, 0, 0, 0, 0, 0, 0, 0.42],
-        seed: 'MOSS-BRUSH-84',
+        seed: 'sleepy-fern',
         visuals: { snapBand: 'mid', snapThreshold: 0.48, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-hat',
-        label: 'Hat-84',
+        label: 'Shaker',
         role: 'hat',
         variant: 'moss-shaker',
         muted: false,
         gain: 0.7,
         steps: [0.65, 0.25, 0.72, 0.3, 0.65, 0.25, 0.8, 0.42, 0.65, 0.25, 0.72, 0.3, 0.65, 0.4, 0.88, 0.35],
-        seed: 'MOSS-SHAKER-84',
+        seed: 'misty-brook',
         visuals: { snapBand: 'treble', snapThreshold: 0.5, vfxTriggerMode: 'single' },
       },
       {
         id: 'marcher-perc',
-        label: 'Perc-84',
+        label: 'Kalimba',
         role: 'perc',
         variant: 'ember-tom',
         muted: false,
         gain: 0.72,
         steps: [0, 0, 0, 0.62, 0, 0, 0, 0, 0, 0, 0, 0.68, 0, 0.55, 0, 0],
-        seed: 'MOSS-EMBER-84',
+        seed: 'cozy-acorn',
         visuals: { snapBand: 'mid', snapThreshold: 0.52, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-bass',
-        label: 'Bass-Star',
+        label: 'Bass',
         role: 'bass',
         variant: 'moss-drone',
         muted: false,
         gain: 0.9,
         steps: [0.95, 0, 0, 0, 0, 0, 0.75, 0, 0.88, 0, 0, 0, 0, 0, 0.7, 0],
-        notes: [33, null, null, null, null, null, 36, null, 40, null, null, null, null, null, 38, null],
-        seed: 'DREI-STAR-GOLD-84',
+        notes: [36, null, null, null, null, null, 38, null, 43, null, null, null, null, null, 40, null],
+        seed: 'gold.ring-mint.gem-sky.pyramid',
         visuals: { snapBand: 'bass', snapThreshold: 0.44, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-melody',
-        label: 'Melody-Star',
+        label: 'Melody',
         role: 'melody',
         variant: 'glass-flute',
         muted: false,
         gain: 0.84,
         steps: [0.85, 0, 0, 0.7, 0, 0.8, 0, 0, 0.9, 0, 0.68, 0, 0, 0.78, 0, 0.72],
-        notes: [69, null, null, 72, null, 76, null, null, 79, null, 76, null, null, 74, null, 72],
-        seed: 'DREI-STAR-AQUA-84',
+        notes: [60, null, null, 62, null, 64, null, null, 67, null, 69, null, null, 67, null, 64],
+        seed: 'aqua.ribbon-mint.star-sky.gem',
         visuals: { snapBand: 'treble', snapThreshold: 0.48, vfxTriggerMode: 'on-beat' },
       },
       {
         id: 'marcher-harmony',
-        label: 'Harmony-Star',
+        label: 'Choir',
         role: 'harmony',
         variant: 'warm-brass',
         muted: false,
         gain: 0.78,
         steps: [0.85, 0, 0, 0, 0, 0, 0, 0, 0.82, 0, 0, 0, 0, 0, 0.65, 0],
-        notes: [57, null, null, null, null, null, null, null, 60, null, null, null, null, null, 55, null],
-        seed: 'DREI-STAR-VIOLET-84',
+        notes: [52, null, null, null, null, null, null, null, 55, null, null, null, null, null, 57, null],
+        seed: 'violet.gem-berry.ribbon-sky.ring',
         visuals: { snapBand: 'mid', snapThreshold: 0.5, vfxTriggerMode: 'on-beat' },
       },
     ],
   },
 };
-
-/**
- * Formal Draft 2020-12 JSON Schema exposed via WebMCP (`get_beat_schema`) & `/api/beat/schema`
- * so any connected AI model can compose constraint-valid beats & Kolmogorov visuals directly.
- */
-export const BEAT_DOCUMENT_JSON_SCHEMA = {
-  $schema: 'https://json-schema.org/draft/2020-12/schema',
-  title: 'ClearCubeBeatDocument',
-  description:
-    'Constraint-based 16-step beat + Drei Stars Crystal Fae visual choreography format. BPM directly controls both audio tempo and walking animation FPS (animFps = 0.2 * bpm, with half-beat STEP/step footwork).',
-  type: 'object',
-  required: ['bpm', 'marchers'],
-  properties: {
-    version: { type: 'string', enum: ['1.0'], default: '1.0' },
-    title: { type: 'string', minLength: 1, maxLength: 48 },
-    bpm: {
-      type: 'integer',
-      minimum: MIN_BPM,
-      maximum: MAX_BPM,
-      description: 'Tempo in beats per minute. Sets animation rate to 0.2 * bpm FPS (24 FPS at 120 BPM).',
-    },
-    scale: {
-      type: 'string',
-      enum: ['D-lydian', 'A-minor', 'F-major', 'E-dorian', 'C-pentatonic'],
-      default: 'D-lydian',
-    },
-    holonomy: {
-      type: 'object',
-      description:
-        'Parallel-transport holonomy sequencer configuration. Non-zero curvature K accumulates Berry phase θ around closed campfire orbits to rotate 16-step rhythms, transpose singers within scale, and morph filter warmth.',
-      properties: {
-        enabled: { type: 'boolean', default: true },
-        curvature: { type: 'number', minimum: -1, maximum: 1, default: 0 },
-        rhythmRotatePerOrbit: { type: 'boolean', default: true },
-        harmonyTransposePerOrbit: { type: 'boolean', default: true },
-        timbreMorph: { type: 'number', minimum: 0, maximum: 1, default: 0.45 },
-        wells: {
-          type: 'array',
-          maxItems: 4,
-          items: {
-            type: 'object',
-            required: ['angle', 'radius', 'strength'],
-            properties: {
-              id: { type: 'string' },
-              angle: { type: 'number', minimum: 0, maximum: 6.29 },
-              radius: { type: 'number', minimum: 5.5, maximum: 10.8 },
-              strength: { type: 'number', minimum: -1, maximum: 1 },
-            },
-          },
-        },
-      },
-    },
-    marchers: {
-      type: 'array',
-      minItems: 1,
-      maxItems: 16,
-      description:
-        'Each marcher is one instrument. Canonical setup: 4 drum marchers (kick, snare, hat, perc) + 3 singer marchers (bass, melody, harmony linked to the Drei Stars).',
-      items: {
-        type: 'object',
-        required: ['role', 'steps'],
-        properties: {
-          id: { type: 'string', minLength: 1, maxLength: 40 },
-          label: { type: 'string', minLength: 1, maxLength: 24 },
-          role: {
-            type: 'string',
-            enum: INSTRUMENT_ROLES,
-          },
-          variant: {
-            type: 'string',
-            description:
-              'Sound variant for the chosen role. kick: warm-sub|808-bloom|hearth-thump; snare: wood-rim|brush-snap|tape-crack; hat: crystal-tick|moss-shaker|open-shimmer; perc: ember-tom|kalimba-wood|chime-conga; bass: zimmer-cello|analog-sub|moss-drone; melody: fae-bell|glass-flute|tycho-rhodes; harmony: choir-pad|quartz-arp|warm-brass.',
-          },
-          muted: { type: 'boolean', default: false },
-          gain: { type: 'number', minimum: 0.1, maximum: 1.2, default: 0.82 },
-          steps: {
-            type: 'array',
-            minItems: 16,
-            maxItems: 16,
-            items: { type: 'number', minimum: 0, maximum: 1 },
-            description: '16 sixteenth-note steps per 4/4 bar (0 = rest, 0.01..1.0 = velocity).',
-          },
-          notes: {
-            type: 'array',
-            minItems: 16,
-            maxItems: 16,
-            items: { type: ['integer', 'null'], minimum: 24, maximum: 108 },
-            description: 'Optional 16-step MIDI note numbers (24..108) for bass, melody, or harmony singers.',
-          },
-          seed: {
-            type: 'string',
-            description: 'Kolmogorov visual seed string determining the Clear Cube head shapes and Fae palette.',
-          },
-          visuals: {
-            type: 'object',
-            properties: {
-              snapBand: { type: 'string', enum: ['bass', 'mid', 'treble'] },
-              snapThreshold: { type: 'number', minimum: 0.12, maximum: 0.92 },
-              vfxTriggerMode: { type: 'string', enum: ['on-beat', 'single'] },
-            },
-          },
-        },
-      },
-    },
-  },
-} as const;
 
 export interface BeatValidationResult {
   ok: boolean;
@@ -636,9 +501,6 @@ export function normalizeNotes16(raw: unknown, role: InstrumentRole): Array<numb
   return out;
 }
 
-/**
- * Strictly validates & sanitizes any incoming BeatDocument (from UI JSON editor or WebMCP model call).
- */
 export function validateBeatDocument(input: unknown): BeatValidationResult {
   const errors: string[] = [];
   if (!input || typeof input !== 'object') {
@@ -659,10 +521,10 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
       : 'D-lydian'
   ) as MusicalScaleId;
 
-  const title =
-    typeof obj.title === 'string' && obj.title.trim().length > 0
-      ? obj.title.trim().slice(0, 48)
-      : 'Drei Stars Hearth';
+  const title = sanitizeFriendlyLabel(
+    typeof obj.title === 'string' ? obj.title : undefined,
+    'Campfire Jam'
+  );
 
   if (!Array.isArray(obj.marchers) || obj.marchers.length === 0) {
     errors.push('marchers must be a non-empty array (1 to 16 marchers).');
@@ -697,10 +559,10 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
     }
     usedIds.add(id);
 
-    const label =
-      typeof m.label === 'string' && m.label.trim().length > 0
-        ? m.label.trim().slice(0, 24)
-        : `${INSTRUMENT_ROLE_LABELS[role].split(' ')[0]}-${String(idx + 1).padStart(2, '0')}`;
+    const label = sanitizeFriendlyLabel(
+      typeof m.label === 'string' ? m.label : undefined,
+      INSTRUMENT_ROLE_LABELS[role]
+    );
 
     const rawGain = Number(m.gain ?? 0.82);
     const gain = Number(Math.max(0.1, Math.min(1.2, Number.isFinite(rawGain) ? rawGain : 0.82)).toFixed(2));
@@ -709,7 +571,7 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
     const notes = normalizeNotes16(m.notes, role);
     const seed =
       typeof m.seed === 'string' && m.seed.trim().length > 0
-        ? m.seed.trim().slice(0, 48)
+        ? m.seed.trim().toLowerCase().slice(0, 48)
         : getDefaultSeedForRole(role);
 
     let visuals: BeatMarcherVisuals | undefined;
@@ -744,38 +606,6 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
     return { ok: false, errors: errors.length > 0 ? errors : ['No valid marchers found in beat JSON.'] };
   }
 
-  let holonomy: HolonomyConfig | undefined;
-  if (obj.holonomy && typeof obj.holonomy === 'object') {
-    const h = obj.holonomy as Record<string, unknown>;
-    const rawCurv = Number(h.curvature ?? 0);
-    const rawMorph = Number(h.timbreMorph ?? 0.45);
-    const wells: HolonomyCurvatureWell[] = [];
-    if (Array.isArray(h.wells)) {
-      for (let i = 0; i < Math.min(4, h.wells.length); i++) {
-        const w = h.wells[i] as Record<string, unknown> | null;
-        if (!w || typeof w !== 'object') continue;
-        const angle = Number(w.angle ?? 0);
-        const radius = Number(w.radius ?? 8.3);
-        const strength = Number(w.strength ?? 0.65);
-        if (!Number.isFinite(angle) || !Number.isFinite(radius) || !Number.isFinite(strength)) continue;
-        wells.push({
-          id: typeof w.id === 'string' && w.id.trim() ? w.id.trim().slice(0, 24) : `well-${i + 1}`,
-          angle: Number(((((angle % (Math.PI * 2)) + Math.PI * 2) % (Math.PI * 2))).toFixed(3)),
-          radius: Number(Math.max(5.5, Math.min(10.8, radius)).toFixed(2)),
-          strength: Number(Math.max(-1, Math.min(1, strength)).toFixed(2)),
-        });
-      }
-    }
-    holonomy = {
-      enabled: h.enabled !== undefined ? Boolean(h.enabled) : true,
-      curvature: Number(Math.max(-1, Math.min(1, Number.isFinite(rawCurv) ? rawCurv : 0)).toFixed(2)),
-      rhythmRotatePerOrbit: h.rhythmRotatePerOrbit !== undefined ? Boolean(h.rhythmRotatePerOrbit) : true,
-      harmonyTransposePerOrbit: h.harmonyTransposePerOrbit !== undefined ? Boolean(h.harmonyTransposePerOrbit) : true,
-      timbreMorph: Number(Math.max(0, Math.min(1, Number.isFinite(rawMorph) ? rawMorph : 0.45)).toFixed(2)),
-      wells,
-    };
-  }
-
   return {
     ok: errors.length === 0,
     document: {
@@ -783,7 +613,6 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
       title,
       bpm,
       scale,
-      ...(holonomy ? { holonomy } : {}),
       marchers,
     },
     errors,
@@ -793,19 +622,24 @@ export function validateBeatDocument(input: unknown): BeatValidationResult {
 export function buildBrainFromBeatMarcher(spec: BeatMarcherSpec): KolmogorovBrain {
   const base = decodeKolmogorov(spec.seed);
   if (isSingerRole(spec.role)) {
-    // Harmonize singer accent hue with its linked Drei Star
     base.accentHue = DREI_STAR_HUES[spec.role];
   }
   return {
     ...base,
-    snapBand: spec.visuals?.snapBand ?? (spec.role === 'kick' || spec.role === 'bass' ? 'bass' : spec.role === 'hat' || spec.role === 'melody' ? 'treble' : 'mid'),
+    snapBand:
+      spec.visuals?.snapBand ??
+      (spec.role === 'kick' || spec.role === 'bass'
+        ? 'bass'
+        : spec.role === 'hat' || spec.role === 'melody'
+          ? 'treble'
+          : 'mid'),
     snapThreshold: spec.visuals?.snapThreshold ?? 0.48,
     vfxTriggerMode: spec.visuals?.vfxTriggerMode ?? 'on-beat',
   };
 }
 
 /**
- * Converts a validated BeatDocument into evenly spaced inner-drum (4) & outer-singer (3) CharacterStates.
+ * Converts a BeatDocument into evenly spaced inner-drum & outer-singer CharacterStates.
  */
 export function buildCharactersFromBeatDocument(
   doc: BeatDocument,
@@ -836,7 +670,7 @@ export function buildCharactersFromBeatDocument(
     return {
       id: spec.id,
       ownerId: null,
-      label: spec.label,
+      label: sanitizeFriendlyLabel(spec.label, INSTRUMENT_ROLE_LABELS[spec.role]),
       role: spec.role,
       variant: spec.variant,
       steps: [...spec.steps],
@@ -866,14 +700,13 @@ export function exportBeatDocumentFromCharacters(
   characters: Iterable<import('./protocol').CharacterState>,
   bpm: number,
   scale: MusicalScaleId,
-  title = 'Drei Stars Hearth',
-  holonomy?: HolonomyConfig
+  title = 'Campfire Jam'
 ): BeatDocument {
   const marchers: BeatMarcherSpec[] = [];
   for (const ch of characters) {
     marchers.push({
       id: ch.id,
-      label: ch.label,
+      label: sanitizeFriendlyLabel(ch.label, INSTRUMENT_ROLE_LABELS[ch.role]),
       role: ch.role,
       variant: ch.variant,
       muted: ch.muted,
@@ -893,8 +726,6 @@ export function exportBeatDocumentFromCharacters(
     title,
     bpm: Math.round(Math.max(MIN_BPM, Math.min(MAX_BPM, bpm))),
     scale,
-    ...(holonomy ? { holonomy: { ...holonomy, wells: holonomy.wells.map((w) => ({ ...w })) } } : {}),
     marchers,
   };
 }
-

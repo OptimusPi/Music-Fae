@@ -4,7 +4,6 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import {
-  BEAT_DOCUMENT_JSON_SCHEMA,
   DEFAULT_BEAT_DOCUMENT,
   DEFAULT_BPM,
   MAX_BPM,
@@ -134,10 +133,6 @@ async function startServer(): Promise<void> {
       clients: clients.size,
       characters: characters.size,
     });
-  });
-
-  app.get('/api/beat/schema', (_req, res) => {
-    res.json(BEAT_DOCUMENT_JSON_SCHEMA);
   });
 
   app.get('/api/beat', (_req, res) => {

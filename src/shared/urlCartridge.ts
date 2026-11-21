@@ -57,8 +57,8 @@ export interface EncodedCartridge {
 }
 
 /**
- * Encodes an entire BeatDocument (BPM, scale, marchers, Kolmogorov seeds, holonomy curvature)
- * into a compact URL hash cartridge (`#beat=z...` when deflate-raw compressed, `#beat=j...` fallback).
+ * Encodes an entire BeatDocument (BPM, scale, marchers, and cube recipes)
+ * into a compact URL hash (`#beat=z...` when deflate-raw compressed, `#beat=j...` fallback).
  */
 export async function encodeBeatToUrlCartridge(doc: BeatDocument): Promise<EncodedCartridge> {
   const json = JSON.stringify(doc);

@@ -64,7 +64,7 @@ const SINGER_MIDI_CHANNELS: Record<'bass' | 'melody' | 'harmony', number> = {
 /**
  * Full two-way WebMIDI Hub:
  * - MIDI In: hardware keyboards & DAWs (Note On + CC#1 Mod, CC#74 Cutoff, CC#71 Res, CC#72 Release)
- * - MIDI Out: streams live 4-drum (Ch 10) + 3-singer (Ch 1..3) notes + holonomy shifts to external synths/LMMS!
+ * - MIDI Out: streams live 4-drum (Ch 10) + 3-singer (Ch 1..3) notes to external synths.
  */
 export class WebMidiHub {
   private access: WebMidiAccess | null = null;

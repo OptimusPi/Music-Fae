@@ -8,7 +8,6 @@ interface Keyboard47Props {
   onTriggerKey: (code: string, midi: number) => void;
 }
 
-// Authentic ANSI physical row stagger offsets (in rem) for 13 / 13 / 11 / 10 key rows
 const ROW_OFFSETS = ['pl-0', 'pl-4', 'pl-7', 'pl-11'];
 
 export const Keyboard47: React.FC<Keyboard47Props> = ({
@@ -60,28 +59,21 @@ export const Keyboard47: React.FC<Keyboard47Props> = ({
                       handlePress(keyDef.code, resolved.midi);
                     }
                   }}
-                  className="relative flex flex-col items-center justify-between flex-1 max-w-[62px] h-9 px-1 py-1 rounded-[5px] border transition-transform duration-75 cursor-pointer"
-                  style={{
-                    transform: isPressed ? 'translateY(1px) scale(0.96)' : 'translateY(0)',
-                    backgroundColor: isPressed
-                      ? `hsl(${resolved.hue}, 90%, 54%)`
+                  className={`relative flex flex-col items-center justify-between flex-1 max-w-[62px] h-9 px-1 py-1 rounded-[5px] border transition-transform duration-75 cursor-pointer ${
+                    isPressed
+                      ? 'translate-y-px scale-95 bg-amber-400 border-amber-200 text-slate-950 font-semibold'
                       : isSharp
-                        ? '#171c28'
-                        : '#252c3e',
-                    borderColor: isPressed
-                      ? `hsl(${resolved.hue}, 95%, 72%)`
-                      : isSharp
-                        ? 'rgba(255,255,255,0.08)'
-                        : 'rgba(255,255,255,0.16)',
-                    color: isPressed ? '#ffffff' : isSharp ? '#9aa6bf' : '#e4eaf5',
-                  }}
+                        ? 'bg-[#171c28] border-white/8 text-slate-400 hover:border-white/20'
+                        : 'bg-[#252c3e] border-white/16 text-slate-100 hover:border-white/30'
+                  }`}
                 >
                   <span className="font-mono text-[10px] font-semibold leading-none">
                     {keyDef.label}
                   </span>
                   <span
-                    className="font-mono text-[9px] leading-none tabular-nums"
-                    style={{ opacity: isPressed ? 1 : 0.65 }}
+                    className={`font-mono text-[9px] leading-none tabular-nums ${
+                      isPressed ? 'opacity-100' : 'opacity-65'
+                    }`}
                   >
                     {resolved.noteName}
                   </span>

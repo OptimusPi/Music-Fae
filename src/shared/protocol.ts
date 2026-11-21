@@ -22,15 +22,75 @@ export const BRAIN_SHAPE_KINDS: BrainShapeKind[] = [
 ];
 
 export const BRAIN_SHAPE_LABELS: Record<BrainShapeKind, string> = {
-  tetra: 'Tetra',
-  octa: 'Octa',
-  icosa: 'Icosa',
-  torus: 'Torus',
-  knot: 'Knot',
-  dodeca: 'Dodeca',
+  tetra: 'Pyramid',
+  octa: 'Diamond',
+  icosa: 'Gem',
+  torus: 'Ring',
+  knot: 'Ribbon',
+  dodeca: 'Star',
   cone: 'Cone',
   prism: 'Prism',
 };
+
+const SHAPE_SLUG_BY_KIND: Record<BrainShapeKind, string> = {
+  tetra: 'pyramid',
+  octa: 'diamond',
+  icosa: 'gem',
+  torus: 'ring',
+  knot: 'ribbon',
+  dodeca: 'star',
+  cone: 'cone',
+  prism: 'prism',
+};
+
+const KIND_BY_SHAPE_SLUG: Record<string, BrainShapeKind> = {
+  pyramid: 'tetra',
+  tetra: 'tetra',
+  diamond: 'octa',
+  octa: 'octa',
+  gem: 'icosa',
+  icosa: 'icosa',
+  ring: 'torus',
+  torus: 'torus',
+  ribbon: 'knot',
+  knot: 'knot',
+  star: 'dodeca',
+  dodeca: 'dodeca',
+  cone: 'cone',
+  prism: 'prism',
+};
+
+export interface ColorSwatchDef {
+  id: string;
+  label: string;
+  hue: number;
+}
+
+export const CUBE_COLOR_SWATCHES: ColorSwatchDef[] = [
+  { id: 'gold', label: 'Gold', hue: 38 },
+  { id: 'coral', label: 'Coral', hue: 16 },
+  { id: 'berry', label: 'Berry', hue: 336 },
+  { id: 'violet', label: 'Violet', hue: 278 },
+  { id: 'sky', label: 'Sky', hue: 206 },
+  { id: 'aqua', label: 'Aqua', hue: 176 },
+  { id: 'mint', label: 'Mint', hue: 152 },
+  { id: 'lime', label: 'Lime', hue: 96 },
+];
+
+function nearestColorSwatch(hue: number): ColorSwatchDef {
+  const norm = ((hue % 360) + 360) % 360;
+  let best = CUBE_COLOR_SWATCHES[0];
+  let bestDist = 999;
+  for (const sw of CUBE_COLOR_SWATCHES) {
+    const raw = Math.abs(sw.hue - norm);
+    const dist = Math.min(raw, 360 - raw);
+    if (dist < bestDist) {
+      bestDist = dist;
+      best = sw;
+    }
+  }
+  return best;
+}
 
 export interface BrainShapeParams {
   kind: BrainShapeKind;
@@ -46,7 +106,7 @@ export type SnapBand = 'bass' | 'mid' | 'treble';
 export interface KolmogorovBrain {
   seed: string;
   complexity: number; // 0..1
-  jankLevel: number; // 0..1 (PSX vertex snap + BPM-coupled step exaggeration)
+  jankLevel: number; // 0..1 (PSX retro snap + step bounce)
   bodyHue: number; // 0..359
   accentHue: number; // 0..359
   shapes: [BrainShapeParams, BrainShapeParams, BrainShapeParams];
@@ -180,8 +240,30 @@ export const CUBE_HALF_SIZE = 13; // 26x26 big cube floor
 export const MARCH_RING_BASE_RADIUS = 8.4;
 
 /**
- * Deterministic PRNG (Mulberry32) used to unfold compact Kolmogorov seed strings
- * into full 3-shape brain geometry, color harmonies, and PSX body palettes.
+ * Cleans up any legacy shouting ALL-CAPS-HYPHEN labels into gentle, readable names.
+ */
+export function sanitizeFriendlyLabel(raw: string | undefined | null, fallback: string): string {
+  if (!raw || !raw.trim()) return fallback;
+  const trimmed = raw.trim().slice(0, 24);
+  const letters = trimmed.replace(/[^a-zA-Z]/g, '');
+  const isAllCaps = letters.length >= 2 && letters === letters.toUpperCase();
+  if (isAllCaps || trimmed.includes('HOLONOMY') || trimmed.includes('DREI-STAR')) {
+    return trimmed
+      .toLowerCase()
+      .replace(/holonomy/g, 'moss')
+      .replace(/drei-star-/g, '')
+      .split(/[-_\s]+/)
+      .filter(Boolean)
+      .slice(0, 2)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(' ') || fallback;
+  }
+  return trimmed;
+}
+
+/**
+ * Deterministic PRNG (Mulberry32) used to unfold short friendly words
+ * into 3 simple shapes + colors inside the Clear Cube head.
  */
 function hashString(str: string): number {
   let h = 2166136261 >>> 0;
@@ -204,104 +286,76 @@ function mulberry32(seed: number): () => number {
 }
 
 /**
- * Compact bi-directional Kolmogorov seed encoding:
- * Format "K3:<S1><S2><S3>-<H1><H2><H3>-<K><J><B>"
- * where every character packs discrete brain parameters, OR any free-form
- * arbitrary string deterministically expands into a unique musical brain.
+ * Simple, human-readable modular recipe format:
+ *   "gold.pyramid-aqua.ring-violet.star"
+ * Each of the 3 parts describes one shape + color inside the Clear Cube (Low, Mid, High).
  */
-const B36 = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ';
-
-function toB36(n: number, maxVal: number): string {
-  const clamped = Math.max(0, Math.min(maxVal, Math.round(n)));
-  return B36[clamped % 36];
-}
-
-function fromB36(ch: string): number {
-  const idx = B36.indexOf(ch.toUpperCase());
-  return idx >= 0 ? idx : 0;
-}
-
 export function encodeKolmogorov(brain: Omit<KolmogorovBrain, 'seed'>): string {
-  const s = brain.shapes;
-  const k0 = BRAIN_SHAPE_KINDS.indexOf(s[0].kind);
-  const k1 = BRAIN_SHAPE_KINDS.indexOf(s[1].kind);
-  const k2 = BRAIN_SHAPE_KINDS.indexOf(s[2].kind);
-
-  const h0 = Math.round(((s[0].hue % 360) + 360) % 360 / 10) % 36;
-  const h1 = Math.round(((s[1].hue % 360) + 360) % 360 / 10) % 36;
-  const h2 = Math.round(((s[2].hue % 360) + 360) % 360 / 10) % 36;
-
-  const sc0 = Math.round(((s[0].scale - 0.55) / 0.9) * 35);
-  const sc1 = Math.round(((s[1].scale - 0.55) / 0.9) * 35);
-  const sc2 = Math.round(((s[2].scale - 0.55) / 0.9) * 35);
-
-  const comp = Math.round(brain.complexity * 35);
-  const jank = Math.round(brain.jankLevel * 35);
-  const body = Math.round(((brain.bodyHue % 360) + 360) % 360 / 10) % 36;
-
-  return `K3:${toB36(k0, 7)}${toB36(k1, 7)}${toB36(k2, 7)}-${toB36(h0, 35)}${toB36(h1, 35)}${toB36(h2, 35)}-${toB36(sc0, 35)}${toB36(sc1, 35)}${toB36(sc2, 35)}-${toB36(comp, 35)}${toB36(jank, 35)}${toB36(body, 35)}`;
+  return brain.shapes
+    .map((sp) => `${nearestColorSwatch(sp.hue).id}.${SHAPE_SLUG_BY_KIND[sp.kind]}`)
+    .join('-');
 }
 
 export function decodeKolmogorov(rawSeed: string): KolmogorovBrain {
-  const trimmed = rawSeed.trim().toUpperCase();
-  const strictMatch = /^K3:([0-7]{3})-([0-9A-Z]{3})-([0-9A-Z]{3})-([0-9A-Z]{3})$/.exec(trimmed);
+  const cleaned = (rawSeed || '')
+    .trim()
+    .toLowerCase()
+    .replace(/holonomy/g, 'moss')
+    .replace(/^k3:/, '');
 
-  if (strictMatch) {
-    const [, kinds, hues, scales, meta] = strictMatch;
-    const complexity = fromB36(meta[0]) / 35;
-    const jankLevel = fromB36(meta[1]) / 35;
-    const bodyHue = (fromB36(meta[2]) * 10) % 360;
-    const accentHue = (bodyHue + 145) % 360;
-
-    const shapes: [BrainShapeParams, BrainShapeParams, BrainShapeParams] = [0, 1, 2].map((i) => {
-      const kind = BRAIN_SHAPE_KINDS[parseInt(kinds[i], 10) % BRAIN_SHAPE_KINDS.length];
-      const hue = (fromB36(hues[i]) * 10) % 360;
-      const scale = 0.55 + (fromB36(scales[i]) / 35) * 0.9;
+  // Check if it matches the modular 3-part "color.shape-color.shape-color.shape" recipe
+  const parts = cleaned.split('-');
+  if (parts.length === 3 && parts.every((p) => p.includes('.'))) {
+    const parsedShapes = parts.map((part, i) => {
+      const [colorId, shapeSlug] = part.split('.');
+      const swatch = CUBE_COLOR_SWATCHES.find((c) => c.id === colorId) ?? CUBE_COLOR_SWATCHES[i * 2];
+      const kind = KIND_BY_SHAPE_SLUG[shapeSlug] ?? BRAIN_SHAPE_KINDS[i];
       return {
         kind,
-        hue,
-        scale: Number(scale.toFixed(2)),
-        orbitSpeed: Number((0.75 + i * 0.45 + complexity * 1.1).toFixed(2)),
-        reactivity: Number((0.75 + complexity * 0.85 + i * 0.12).toFixed(2)),
+        hue: swatch.hue,
+        scale: 0.92,
+        orbitSpeed: Number((0.85 + i * 0.4).toFixed(2)),
+        reactivity: Number((0.95 + i * 0.15).toFixed(2)),
       };
     }) as [BrainShapeParams, BrainShapeParams, BrainShapeParams];
 
+    const accentHue = parsedShapes[0].hue;
+    const bodyHue = (accentHue + 195) % 360;
     return {
-      seed: trimmed,
-      complexity: Number(complexity.toFixed(2)),
-      jankLevel: Number(jankLevel.toFixed(2)),
+      seed: cleaned,
+      complexity: 0.5,
+      jankLevel: 0.6,
       bodyHue,
       accentHue,
-      shapes,
+      shapes: parsedShapes,
     };
   }
 
-  // Any free-form Kolmogorov program / phrase hashes deterministically into a full brain
-  const rng = mulberry32(hashString(trimmed || 'CRYSTAL-FAE-HEARTH'));
-  const baseHue = Math.floor(rng() * 36) * 10;
-  const complexity = Number((0.28 + rng() * 0.65).toFixed(2));
-  const jankLevel = Number((0.45 + rng() * 0.5).toFixed(2));
-  const bodyHue = (baseHue + 180 + Math.floor(rng() * 4) * 20) % 360;
-  const accentHue = (baseHue + 30) % 360;
+  // Any short word or phrase (like "sleepy frog" or "sunny-moss") deterministically builds a 3-shape head
+  const safePhrase = cleaned || 'sunny-moss';
+  const rng = mulberry32(hashString(safePhrase));
+  const rootSwatch = CUBE_COLOR_SWATCHES[Math.floor(rng() * CUBE_COLOR_SWATCHES.length)];
+  const complexity = Number((0.35 + rng() * 0.5).toFixed(2));
+  const jankLevel = Number((0.45 + rng() * 0.45).toFixed(2));
+  const bodyHue = (rootSwatch.hue + 190 + Math.floor(rng() * 3) * 15) % 360;
+  const accentHue = rootSwatch.hue;
 
-  // Curated luminous triad hue harmonies for Crystal Fae twilight palettes
-  const offsets = [0, 110 + Math.floor(rng() * 40), 220 + Math.floor(rng() * 40)];
-
+  const offsets = [0, 120 + Math.floor(rng() * 35), 235 + Math.floor(rng() * 35)];
   const shapes: [BrainShapeParams, BrainShapeParams, BrainShapeParams] = [0, 1, 2].map((i) => {
     const kind = BRAIN_SHAPE_KINDS[Math.floor(rng() * BRAIN_SHAPE_KINDS.length)];
-    const hue = (baseHue + offsets[i]) % 360;
-    const scale = Number((0.72 + rng() * 0.55).toFixed(2));
+    const hue = nearestColorSwatch((rootSwatch.hue + offsets[i]) % 360).hue;
+    const scale = Number((0.82 + rng() * 0.35).toFixed(2));
     return {
       kind,
       hue,
       scale,
-      orbitSpeed: Number((0.75 + i * 0.42 + complexity * 1.1).toFixed(2)),
-      reactivity: Number((0.75 + complexity * 0.85 + i * 0.12).toFixed(2)),
+      orbitSpeed: Number((0.8 + i * 0.4 + complexity * 0.9).toFixed(2)),
+      reactivity: Number((0.85 + complexity * 0.7 + i * 0.12).toFixed(2)),
     };
   }) as [BrainShapeParams, BrainShapeParams, BrainShapeParams];
 
   return {
-    seed: trimmed || encodeKolmogorov({ complexity, jankLevel, bodyHue, accentHue, shapes }),
+    seed: safePhrase,
     complexity,
     jankLevel,
     bodyHue,
@@ -309,44 +363,44 @@ export function decodeKolmogorov(rawSeed: string): KolmogorovBrain {
     shapes,
   };
 }
+
+const COZY_ADJECTIVES = [
+  'sunny',
+  'mossy',
+  'sleepy',
+  'cozy',
+  'misty',
+  'berry',
+  'starry',
+  'honey',
+  'clover',
+  'gentle',
+  'peachy',
+  'breezy',
+];
+
+const COZY_NOUNS = [
+  'frog',
+  'pebble',
+  'lantern',
+  'acorn',
+  'chime',
+  'brook',
+  'cloud',
+  'moth',
+  'fern',
+  'sprout',
+  'bell',
+  'ember',
+];
 
 export function generateRandomKolmogorovBrain(): KolmogorovBrain {
-  const rng = Math.random;
-  // Harmonious twilight crystal palettes (amber, seafoam, opal, amethyst, coral)
-  const paletteRoots = [16, 38, 178, 206, 282, 336];
-  const rootHue = paletteRoots[Math.floor(rng() * paletteRoots.length)];
-  const complexity = Number((0.35 + rng() * 0.55).toFixed(2));
-  const jankLevel = Number((0.55 + rng() * 0.4).toFixed(2));
-  const bodyHue = (rootHue + 190 + Math.floor(rng() * 3) * 15) % 360;
-  const accentHue = (rootHue + 20) % 360;
-
-  const pickedKinds: BrainShapeKind[] = [];
-  while (pickedKinds.length < 3) {
-    const k = BRAIN_SHAPE_KINDS[Math.floor(rng() * BRAIN_SHAPE_KINDS.length)];
-    if (!pickedKinds.includes(k)) pickedKinds.push(k);
-  }
-
-  const hueSpread = [0, 125, 245];
-  const shapes: [BrainShapeParams, BrainShapeParams, BrainShapeParams] = [0, 1, 2].map((i) => ({
-    kind: pickedKinds[i],
-    hue: (rootHue + hueSpread[i] + Math.floor(rng() * 24)) % 360,
-    scale: Number((0.8 + rng() * 0.4).toFixed(2)),
-    orbitSpeed: Number((0.75 + i * 0.42 + complexity * 1.1).toFixed(2)),
-    reactivity: Number((0.8 + complexity * 0.75 + i * 0.12).toFixed(2)),
-  })) as [BrainShapeParams, BrainShapeParams, BrainShapeParams];
-
-  const seed = encodeKolmogorov({ complexity, jankLevel, bodyHue, accentHue, shapes });
-  return {
-    seed,
-    complexity,
-    jankLevel,
-    bodyHue,
-    accentHue,
-    shapes,
-  };
+  const adj = COZY_ADJECTIVES[Math.floor(Math.random() * COZY_ADJECTIVES.length)];
+  const noun = COZY_NOUNS[Math.floor(Math.random() * COZY_NOUNS.length)];
+  return decodeKolmogorov(`${adj}-${noun}`);
 }
 
-const CUBE_PREFIXES = ['Kubo', 'Vex', 'Mino', 'Piko', 'Trio', 'Zed', 'Luma', 'Sora', 'Noko', 'Brix'];
+const CUTE_NAMES = ['Kubo', 'Mino', 'Piko', 'Luma', 'Sora', 'Noko', 'Brix', 'Pip', 'Toko', 'Momo'];
 
 export function createSpawnCharacter(
   ownerId: string,
@@ -366,29 +420,27 @@ export function createSpawnCharacter(
 ): CharacterState {
   const b = brain ?? generateRandomKolmogorovBrain();
   const id = instrument?.id ?? `cube-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
-  const prefix = CUBE_PREFIXES[Math.floor(Math.random() * CUBE_PREFIXES.length)];
-  const num = Math.floor(10 + Math.random() * 89);
+  const cuteName = CUTE_NAMES[Math.floor(Math.random() * CUTE_NAMES.length)];
   const role: InstrumentRole = instrument?.role ?? 'melody';
   const variant = instrument?.variant ?? 'fae-bell';
   const steps = instrument?.steps ?? [0.85, 0, 0.7, 0, 0, 0.8, 0, 0.65, 0.9, 0, 0, 0.75, 0, 0.8, 0.85, 0];
   const isSinger = role === 'bass' || role === 'melody' || role === 'harmony';
   const spawnAngle = instrument?.orbitAngle ?? Math.random() * Math.PI * 2;
-  const orbitRadius = instrument?.orbitRadius ?? (isSinger ? 9.15 : 7.55) + (Math.random() - 0.5) * 0.4;
-  const spawnDist = orbitRadius;
+  const orbitRadius = instrument?.orbitRadius ?? (isSinger ? 9.15 : 7.55) + (Math.random() - 0.5) * 0.35;
 
   return {
     id,
     ownerId,
-    label: instrument?.label ?? `${prefix}-${num}`,
+    label: sanitizeFriendlyLabel(instrument?.label, cuteName),
     role,
     variant,
     steps: [...steps],
     ...(instrument?.notes ? { notes: [...instrument.notes] } : {}),
     gain: instrument?.gain ?? 0.82,
     muted: instrument?.muted ?? false,
-    x: Number((Math.cos(spawnAngle) * spawnDist).toFixed(2)),
+    x: Number((Math.cos(spawnAngle) * orbitRadius).toFixed(2)),
     y: 0,
-    z: Number((Math.sin(spawnAngle) * spawnDist).toFixed(2)),
+    z: Number((Math.sin(spawnAngle) * orbitRadius).toFixed(2)),
     vx: 0,
     vy: 0,
     vz: 0,

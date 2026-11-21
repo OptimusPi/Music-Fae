@@ -22,7 +22,6 @@ interface SharedRigGeometries {
   visorChevron: THREE.BufferGeometry;
   shadowDisc: THREE.CircleGeometry;
   stageRing: THREE.RingGeometry;
-  holonomyLoop: THREE.TorusGeometry;
   vfxWaveRing: THREE.RingGeometry;
   starCrown: THREE.OctahedronGeometry;
   drumHalo: THREE.TorusGeometry;
@@ -198,7 +197,6 @@ function getSharedGeometries(): SharedRigGeometries {
     visorChevron: createVisorChevronGeometry(),
     shadowDisc: new THREE.CircleGeometry(0.95, 20),
     stageRing: new THREE.RingGeometry(1.05, 1.22, 32),
-    holonomyLoop: new THREE.TorusGeometry(0.42, 0.008, 6, 44),
     vfxWaveRing: new THREE.RingGeometry(0.62, 0.84, 28),
     starCrown: new THREE.OctahedronGeometry(0.16, 0),
     drumHalo: new THREE.TorusGeometry(0.54, 0.022, 6, 24),
@@ -273,10 +271,6 @@ export class CharacterRig {
   private brainMats: [THREE.MeshStandardMaterial, THREE.MeshStandardMaterial, THREE.MeshStandardMaterial];
   private brainKinds: [BrainShapeKind, BrainShapeKind, BrainShapeKind];
 
-  // Subtle internal geodesic holonomy loops revealed inside the enlarged center-stage crystal head
-  private holonomyLoopA: THREE.Mesh;
-  private holonomyLoopB: THREE.Mesh;
-  private holonomyMat: THREE.MeshBasicMaterial;
 
   // 3 internal music visualizer bars inside every Clear Cube head
   private eqBars: [THREE.Mesh, THREE.Mesh, THREE.Mesh];
@@ -473,23 +467,6 @@ export class CharacterRig {
     this.antennaMesh.rotation.z = -0.22;
     this.headGroup.add(this.antennaMesh);
 
-    // 6. Subtle Internal Geodesic Holonomy Loops (faded in during Center-Stage Giant-Head Mode)
-    this.holonomyMat = new THREE.MeshBasicMaterial({
-      color: 0x3b4863,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-    });
-    this.holonomyLoopA = new THREE.Mesh(geo.holonomyLoop, this.holonomyMat);
-    this.holonomyLoopA.renderOrder = 7;
-    this.holonomyLoopA.visible = false;
-    this.headGroup.add(this.holonomyLoopA);
-
-    this.holonomyLoopB = new THREE.Mesh(geo.holonomyLoop, this.holonomyMat);
-    this.holonomyLoopB.rotation.x = Math.PI / 2;
-    this.holonomyLoopB.renderOrder = 7;
-    this.holonomyLoopB.visible = false;
-    this.headGroup.add(this.holonomyLoopB);
 
     // 7. 3 Internal Equalizer Visualizer Bars (Bass / Mid / Treble) inside back of Clear Cube
     const eqBars: THREE.Mesh[] = [];
@@ -702,8 +679,7 @@ export class CharacterRig {
     nowMs: number,
     audio: AudioBands,
     clock: MusicalClock,
-    delta: number,
-    holonomyTheta = 0
+    delta: number
   ): void {
     this.root.position.set(state.x, state.y, state.z);
     this.root.rotation.y = state.yaw;
@@ -911,27 +887,7 @@ export class CharacterRig {
     this.hitMesh.scale.set(hitScaleXZ, hitScaleY, hitScaleXZ);
     this.hitMesh.position.y = 1.7 + this.stageExpand * 1.65;
 
-    // Internal geodesic holonomy loops visible inside crystal head (shows live Berry-phase precession!)
-    const hasHolonomyTwist = Math.abs(holonomyTheta) > 0.04;
-    const showHolonomy = this.stageExpand > 0.08 || hasHolonomyTwist;
-    this.holonomyLoopA.visible = showHolonomy;
-    this.holonomyLoopB.visible = this.stageExpand > 0.08 || Math.abs(holonomyTheta) > 0.35;
-    if (showHolonomy) {
-      const holoAngle = elapsedSec * (0.35 + state.brain.complexity * 0.75) + state.orbitAngle + holonomyTheta;
-      this.holonomyLoopA.rotation.set(holoAngle * 0.6 + holonomyTheta * 0.5, holoAngle, 0.35 + holonomyTheta * 0.4);
-      this.holonomyLoopB.rotation.set(Math.PI / 2 - holoAngle * 0.45, 0.4 + holonomyTheta, holoAngle * 0.8);
-      const baseVis = Math.max(this.stageExpand, hasHolonomyTwist ? 0.42 : 0);
-      this.holonomyMat.opacity = baseVis * (0.26 + this.vfxPulse * 0.28);
-      this.holonomyMat.color.setHSL(
-        this.vfxPulse > 0.15
-          ? ((((this.vfxHue % 360) + 360) % 360) / 360)
-          : ((((state.brain.accentHue + (holonomyTheta * 180) / Math.PI) % 360) + 360) % 360) / 360,
-        0.78,
-        0.54
-      );
-    }
-
-    // UPDATE INTERNAL 3-BAR MUSIC VISUALIZER + 3 KOLMOGOROV BRAIN SHAPES INSIDE THE CLEAR CUBE
+    // UPDATE INTERNAL 3-BAR MUSIC VISUALIZER + 3 MODULAR SHAPES INSIDE THE CLEAR CUBE
     const bands: [number, number, number] = [audio.bass, audio.mid, audio.treble];
     const bootAgeSec = (nowMs - state.bootAt) / 1000;
     const complexity = state.brain.complexity;
@@ -972,12 +928,9 @@ export class CharacterRig {
         }
       }
 
-      // Holonomy twist: internal brain fiber rotates smoothly with accumulated Berry-phase holonomy θ
-      const holonomyPhase = (state.orbitAngle * (1 + complexity * 2) + state.yaw * 0.5) * 0.35 + holonomyTheta;
       const orbitPhase =
         elapsedSec * sp.orbitSpeed * (0.85 + complexity * 0.65) +
-        i * ((Math.PI * 2) / 3) +
-        holonomyPhase;
+        i * ((Math.PI * 2) / 3);
       const orbitR = (0.2 + complexity * 0.1 + energy * 0.05) * (i === 0 ? 0.85 : 1.0);
       const bx = Math.cos(orbitPhase) * orbitR;
       const by =
@@ -1137,7 +1090,6 @@ export class CharacterRig {
     this.glassMat.dispose();
     this.edgeMat.dispose();
     this.wingMat.dispose();
-    this.holonomyMat.dispose();
     this.shadowMat.dispose();
     this.stageRingMat.dispose();
     this.vfxRingMat.dispose();

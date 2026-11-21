@@ -1,7 +1,5 @@
 import {
   DEFAULT_BPM,
-  DEFAULT_HOLONOMY,
-  HolonomyConfig,
   InstrumentRole,
   MAX_BPM,
   MIN_BPM,
@@ -42,11 +40,11 @@ export interface ZynSynthParams {
 }
 
 export const ZYN_PATCH_LABELS: Record<ZynPatchId, string> = {
-  'pad-glass': 'Pad Glass',
-  'ad-brass': 'Analog Brass',
-  'sub-pluck': 'Sub Pluck',
-  'fm-bell': 'FM Bell',
-  'lofi-acid': 'Lo-Fi Bass',
+  'pad-glass': 'Glass Pad',
+  'ad-brass': 'Warm Brass',
+  'sub-pluck': 'Soft Pluck',
+  'fm-bell': 'Chime Bell',
+  'lofi-acid': 'Warm Bass',
 };
 
 export type DanceBreakStyle = 'wave' | 'mega-twirl' | 'moon-spin' | 'head-pop';
@@ -146,10 +144,6 @@ class TastefulSoundEngine {
   private lastReportedBeat = -1;
   private lastScheduledSixteenth = -1;
 
-  // Parallel-Transport Holonomy state
-  private holonomyConfig: HolonomyConfig = { ...DEFAULT_HOLONOMY, wells: [] };
-  private marcherHolonomyPhases = new Map<string, number>();
-
   // Real-time Microphone Onset BPM Detector state
   private micPrevBass = 0;
   private micAvgFlux = 0.04;
@@ -232,28 +226,6 @@ class TastefulSoundEngine {
 
   public setEnsembleVoices(voices: EnsembleVoiceSpec[]): void {
     this.ensembleVoices = voices;
-  }
-
-  public setHolonomyConfig(cfg: HolonomyConfig): void {
-    this.holonomyConfig = {
-      ...cfg,
-      wells: cfg.wells.map((w) => ({ ...w })),
-    };
-  }
-
-  public getHolonomyConfig(): HolonomyConfig {
-    return {
-      ...this.holonomyConfig,
-      wells: this.holonomyConfig.wells.map((w) => ({ ...w })),
-    };
-  }
-
-  public setMarcherHolonomyPhase(id: string, phaseRad: number): void {
-    this.marcherHolonomyPhases.set(id, phaseRad);
-  }
-
-  public clearHolonomyPhases(): void {
-    this.marcherHolonomyPhases.clear();
   }
 
   public setCharacterSingCallback(
@@ -341,37 +313,9 @@ class TastefulSoundEngine {
     return spec.rootMidi + octOffset + spec.intervals[idx];
   }
 
-  private transposeMidiInScale(midi: number, degreeShift: number): number {
-    if (degreeShift === 0) return midi;
-    const spec = SCALE_INTERVALS[this.scale] ?? SCALE_INTERVALS['D-lydian'];
-    const intervals = spec.intervals;
-    const rootPc = spec.rootMidi % 12;
-    const rel = midi - rootPc;
-    const oct = Math.floor(rel / 12);
-    const pc = ((rel % 12) + 12) % 12;
-
-    let bestIdx = 0;
-    let bestDist = 99;
-    for (let i = 0; i < intervals.length; i++) {
-      const d = Math.abs(intervals[i] - pc);
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
-    }
-
-    const totalDeg = bestIdx + degreeShift;
-    const octDelta = Math.floor(totalDeg / intervals.length);
-    const nextIdx = ((totalDeg % intervals.length) + intervals.length) % intervals.length;
-    const nextMidi = rootPc + (oct + octDelta) * 12 + intervals[nextIdx];
-    return Math.max(24, Math.min(108, nextMidi));
-  }
-
   /**
-   * Sample-tight 16-step per-marcher engine + Holonomy parallel-transport modulation + 8-beat campfire pulse:
-   * - Each marcher plays ITS OWN instrument role + variant on its active 16th steps!
-   * - Non-zero holonomy Berry phase θ rotates rhythm steps, parallel-transports singer harmony within scale,
-   *   and morphs timbre warmth smoothly around closed loops.
+   * Sample-tight 16-step per-marcher engine + 8-beat campfire pulse:
+   * - Each marcher plays its own instrument role + variant on its active 16th steps.
    * - Campfire breathes organic wood crackle on Beat 4 (BUMP) and warm flare on Beat 8 (FOOOF!).
    */
   private triggerSyncedEnsembleStep(totalSixteenths: number): void {
@@ -394,30 +338,17 @@ class TastefulSoundEngine {
       }
     }
 
-    const holo = this.holonomyConfig;
-    const holoEnabled =
-      holo.enabled && (Math.abs(holo.curvature) > 0.01 || holo.wells.length > 0);
-
     // 2. Every active marcher performs its dedicated instrument (4 drums + 3 Drei Stars singers)
     for (const voice of this.ensembleVoices) {
       if (voice.muted) continue;
 
-      const theta = holoEnabled ? (this.marcherHolonomyPhases.get(voice.id) ?? 0) : 0;
-      // Euclidean rhythm rotation driven by accumulated Berry phase (4 steps per full 2π twist)
-      const stepRotate =
-        holoEnabled && holo.rhythmRotatePerOrbit
-          ? Math.round((theta / (Math.PI * 2)) * 8)
-          : 0;
-      const readStep = (((step16 - stepRotate) % 16) + 16) % 16;
-
-      const stepVel = voice.steps?.[readStep] ?? 0;
+      const stepVel = voice.steps?.[step16] ?? 0;
       if (stepVel <= 0.01) continue;
 
-      const timbreLift = holoEnabled ? Math.sin(theta) * holo.timbreMorph : 0;
       const level = Math.max(0.05, Math.min(1.2, stepVel * (voice.gain ?? 0.82)));
       const hue = isSingerRole(voice.role)
-        ? (voice.brain.accentHue + (holoEnabled ? (theta * 180) / Math.PI : 0)) % 360
-        : voice.brain.shapes[readStep % 3].hue;
+        ? voice.brain.accentHue
+        : voice.brain.shapes[step16 % 3].hue;
 
       if (voice.role === 'kick') {
         this.playDrumKick(voice.variant, now, level);
@@ -429,30 +360,22 @@ class TastefulSoundEngine {
         this.playDrumHat(voice.variant, now, level);
         this.onEnsembleMidiEvent?.('hat', null, stepVel, stepSec * 650);
       } else if (voice.role === 'perc') {
-        const pitchStep = (((readStep + Math.floor(voice.brain.bodyHue / 40) + Math.round(theta * 1.2)) % 5) + 5) % 5;
+        const pitchStep = (((step16 + Math.floor(voice.brain.bodyHue / 40)) % 5) + 5) % 5;
         this.playDrumPerc(voice.variant, now, level, pitchStep);
         this.onEnsembleMidiEvent?.('perc', null, stepVel, stepSec * 800);
       } else {
-        // Singer roles: Bass, Melody, Harmony with smooth diatonic parallel-transport transposition
-        const explicitMidi = voice.notes?.[readStep];
-        const baseMidi =
+        const explicitMidi = voice.notes?.[step16];
+        const midi =
           typeof explicitMidi === 'number'
             ? explicitMidi
-            : this.resolveScaleMidi(voice.role, readStep + Math.floor(voice.brain.shapes[0].hue / 45));
-
-        const degreeShift =
-          holoEnabled && holo.harmonyTransposePerOrbit
-            ? Math.round(Math.sin(theta) * 2.4)
-            : 0;
-        const midi = this.transposeMidiInScale(baseMidi, degreeShift);
+            : this.resolveScaleMidi(voice.role, step16 + Math.floor(voice.brain.shapes[0].hue / 45));
         const freq = midiToFreq(midi);
 
         if (voice.role === 'bass') {
           this.playSingerBass(voice.variant, freq, now, stepSec * 3.1, level);
           this.onEnsembleMidiEvent?.('bass', midi, stepVel, stepSec * 3000);
         } else if (voice.role === 'melody') {
-          const morphedComplexity = Math.max(0, Math.min(1, voice.brain.complexity + timbreLift * 0.45));
-          this.playSingerMelody(voice.variant, freq, now, stepSec * 2.6, level, morphedComplexity);
+          this.playSingerMelody(voice.variant, freq, now, stepSec * 2.6, level, voice.brain.complexity);
           this.onEnsembleMidiEvent?.('melody', midi, stepVel, stepSec * 2500);
         } else {
           this.playSingerHarmony(voice.variant, freq, now, stepSec * 4.4, level);
